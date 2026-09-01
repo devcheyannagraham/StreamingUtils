@@ -6,7 +6,7 @@
  */
 import { throwError, timer } from 'rxjs';
 import { HttpEventType, HttpHandlerFn, HttpRequest, HttpEvent } from '@angular/common/http';
-import { STREAMING_RESPONSE } from './globals';
+import { STREAMING_RESPONSE } from './globals.js';
 import { timeout, retry, map, catchError } from 'rxjs/operators';
 
 /**

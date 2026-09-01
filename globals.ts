@@ -3,12 +3,12 @@
  * `streamSubscription` observer factory used to consume streamed, back-to-back
  * JSON responses.
  */
-import { HttpContextToken, HttpEvent } from '@angular/common/http';
+import { HttpContextToken, HttpEvent } from "@angular/common/http";
 
 /** Marks a request as a long-lived streamed response so `retryInterceptor` applies retry/timeout handling to it. */
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
 
-import { Observer } from 'rxjs';
+import { Observer } from "rxjs";
 
 /**
  * Builds the Observer for a streamed HTTP request: logs whatever value
@@ -37,14 +37,14 @@ export const streamSubscription = ({
     },
     error: (error) => {
       if (error.status === 0) {
-        console.error('POST stream request error: Request timed out');
+        console.error("POST stream request error: Request timed out");
       } else {
-        console.error('POST stream request error:', error);
+        console.error("POST stream request error:", error);
       }
       if (errorCB) errorCB(error);
     },
     complete: () => {
-      console.log('POST stream request completed');
+      console.log("POST stream request completed");
       if (completeCB) completeCB();
     },
   };
@@ -57,4 +57,7 @@ export type ParsedData = {
   done?: any;
 };
 
-export type StreamEventFunction = (parsedData?: ParsedData, event?: HttpEvent<any>) => any | void;
+export type StreamEventFunction = (
+  parsedData?: ParsedData,
+  event?: HttpEvent<any>,
+) => any | void;
