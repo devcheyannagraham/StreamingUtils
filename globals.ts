@@ -3,12 +3,36 @@
  * `streamSubscription` observer factory used to consume streamed, back-to-back
  * JSON responses.
  */
-import { HttpContextToken, HttpEvent } from "@angular/common/http";
+import {
+  HttpContextToken,
+  HttpEvent,
+  HttpEventType,
+} from "@angular/common/http";
 
-/** Marks a request as a long-lived streamed response so `retryInterceptor` applies retry/timeout handling to it. */
+import { Observable, Observer, throwError, timer } from "rxjs";
+
+/** Marks a request as a long-lived streamed response so the interceptor applies retry and timeout handling. */
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
 
-import { Observer } from "rxjs";
+const DEFAULT_DELAY = 1000; // base delay for linear backoff
+const DEFAULT_MAX_DELAY = 15000; // maximum delay for linear backoff
+const DEFAULT_JITTER = 500; // random jitter to avoid thundering herd problem
+const DEFAULT_CHUNK_TIMEOUT = 5000;
+const DEFAULT_REQUEST_TIMEOUT = 30000;
+const DEFAULT_RETRY_COUNT = 3;
+
+/** Supplies default retry, timeout, parsing, and error-handling behavior for each request. */
+export const STREAM_CONFIG = new HttpContextToken<StreamConfig>(() => ({
+  delay: DEFAULT_DELAY,
+  maxDelay: DEFAULT_MAX_DELAY,
+  jitter: DEFAULT_JITTER,
+  chunkTimeout: DEFAULT_CHUNK_TIMEOUT,
+  requestTimeout: DEFAULT_REQUEST_TIMEOUT,
+  retryCount: DEFAULT_RETRY_COUNT,
+  delayNotifier: delayNotifier,
+  errorHandler: defaultErrorHandler,
+  serverErrorCheck: serverErrorCheck,
+}));
 
 /**
  * Builds the Observer for a streamed HTTP request: logs whatever value
@@ -49,6 +73,41 @@ export const streamSubscription = ({
   };
 };
 
+/** Creates a retry callback with linear backoff and jitter from the request's delay settings. */
+const delayNotifier: DelayNotifierType = ({ delay = DEFAULT_DELAY, maxDelay = DEFAULT_MAX_DELAY, jitter = DEFAULT_JITTER }) => {
+  return (error: Error, retryCount: number) => {
+    const currentDelay =
+      retryCount * delay + Math.floor(Math.random() * jitter);
+
+    // Stop scheduling retries after the configured delay ceiling is exceeded.
+    if (currentDelay > maxDelay) {
+      return throwError(() => new Error("Maximum delay exceeded"));
+    }
+
+    console.warn(
+      `${error}:\nClient Retrying request after ${currentDelay}ms (retry count: ${retryCount})`,
+    );
+    return timer(currentDelay);
+  };
+};
+
+/** Throws the server's in-band error marker so the interceptor's retry and error handlers react to it. */
+const serverErrorCheck = (event: HttpEvent<any>) => {
+  if (event.type === HttpEventType.DownloadProgress) {
+    // @ts-ignore
+    const error = event?.parsedData?.error;
+    if (error) {
+      throw new Error(error || "Unknown server error");
+    }
+  }
+  return event;
+};
+
+/** Rethrows `error` once retries are exhausted, or immediately for non-streaming requests. */
+const defaultErrorHandler = (error: Error): Observable<never> => {
+  return throwError(() => error);
+};
+
 export type ParsedData = {
   retry?: any;
   error?: any;
@@ -60,3 +119,25 @@ export type StreamEventFunction = (
   parsedData?: ParsedData,
   event?: HttpEvent<any>,
 ) => any | void;
+
+export type StreamConfig = {
+  delay: number;
+  maxDelay: number;
+  jitter: number;
+  chunkTimeout: number;
+  requestTimeout: number;
+  retryCount: number;
+  delayNotifier: DelayNotifierType;
+  errorHandler: (error: Error) => Observable<never>;
+  serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
+};
+
+export type DelayNotifierType = ({
+  delay,
+  maxDelay,
+  jitter,
+}: {
+  delay?: number;
+  maxDelay?: number;
+  jitter?: number;
+}) => (error: Error, retryCount: number) => Observable<any>;

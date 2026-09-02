@@ -4,14 +4,13 @@
  * the `STREAMING_RESPONSE` context token set by `Requests.makeStreamRequest`
  * (../Services/requests.ts).
  */
-import { throwError, timer } from "rxjs";
+import { throwError } from "rxjs";
 import {
   HttpEventType,
-  HttpHandlerFn,
-  HttpRequest,
+  HttpInterceptorFn,
   HttpEvent,
 } from "@angular/common/http";
-import { STREAMING_RESPONSE } from "./globals.js";
+import { STREAM_CONFIG, STREAMING_RESPONSE } from "./globals.js";
 import { timeout, retry, map, catchError } from "rxjs/operators";
 
 /**
@@ -25,67 +24,45 @@ import { timeout, retry, map, catchError } from "rxjs/operators";
  * JSON messages), this buffers partial text until each message is complete
  * before parsing it.
  */
-export const HTTPStreamInterceptor = (
-  req: HttpRequest<any>,
-  next: HttpHandlerFn,
-) => {
+export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
+  // Read this request's configuration, including the context token's defaults.
+  const config = req.context.get(STREAM_CONFIG);
+
   if (req.context.get(STREAMING_RESPONSE)) {
-    let partialTextLength = 0; // Track the length of the partial text received so far
+    let partialTextLength = 0;
     let buffer: string = "";
 
     return next(req).pipe(
-      //  Intercept and parse data, throwing error upstream if the server signals an in-band error mid-stream.
+      // Parse streamed data and surface any in-band server error to retry.
       map((event) => bufferData(event, buffer, partialTextLength)),
-      map((event) => serverErrorCheck(event)),
+      map((event) => config.serverErrorCheck(event)),
       timeout({
-        each: 5000,
-        // retry downstream catches this error and sends to delay notifier.
-        with: (info) => {
+        each: config.chunkTimeout,
+        // The retry operator sends timeout errors to the configured notifier.
+        with: () => {
           return throwError(() => new Error("Chunk Request timed out"));
         },
       }),
-      retry({ count: 3, delay: delayNotifier() }),
-      catchError(defaultErrorHandler),
+      retry({
+        count: config.retryCount,
+        delay: config.delayNotifier(config),
+      }),
+      catchError(config.errorHandler),
     );
   }
 
-  // Non-streaming requests just get the shared error logging, no retry/timeout handling.
+  // Non-streaming requests use the request's error handler without stream retries.
   else {
-    return next(req).pipe(catchError(defaultErrorHandler));
+    return next(req).pipe(catchError(config.errorHandler));
   }
 };
 
-/** Builds a retry delay function with a linear backoff plus jitter (see requests.ts for the same pattern). */
-const delayNotifier = ({
-  delay = 1000,
-  maxDelay = 15000,
-  jitter = 500,
-}: {
-  delay?: number;
-  maxDelay?: number;
-  jitter?: number;
-} = {}) => {
-  return (error: any, retryCount: any) => {
-    const currentDelay =
-      retryCount * delay + Math.floor(Math.random() * jitter);
-
-    // Guard clause: bail out of retrying once the configured delay ceiling is exceeded.
-    if (currentDelay > maxDelay) {
-      return throwError(() => new Error("Maximum delay exceeded"));
-    }
-
-    console.warn(
-      `${error}:\nClient Retrying request after ${currentDelay}ms (retry count: ${retryCount})`,
-    );
-    return timer(currentDelay);
-  };
-};
-
-const defaultErrorHandler = (error: any) => {
-  // Gets fired after retries are exhausted, or for non-streaming requests.
-  return throwError(() => error);
-};
-
+/**
+ * Buffers a streamed `DownloadProgress` event's text until each newline-delimited
+ * JSON message is complete, then parses and merges those messages onto `event.parsedData`.
+ * Why: one event's `partialText` can end mid-message, or contain several messages,
+ * so parsing per-event instead of per-message would throw on partial JSON or drop data.
+ */
 const bufferData = (
   event: HttpEvent<any>,
   buffer: string,
@@ -131,8 +108,7 @@ const bufferData = (
       }
     }, {});
 
-    // Update the length of the partial text received so far.
-    // track last read position so we don't re-parse the same data in the next chunk
+    // Track last read position so the next chunk doesn't re-parse the same data.
     partialTextLength = event.partialText.length;
   } else if (event.type === HttpEventType.Sent) {
     // new request, reset partialTextLength
@@ -141,16 +117,5 @@ const bufferData = (
   }
   // @ts-ignore
   event["parsedData"] = dataChunk;
-  return event;
-};
-
-const serverErrorCheck = (event: HttpEvent<any>) => {
-  if (event.type === HttpEventType.DownloadProgress) {
-    // @ts-ignore
-    const error = event?.parsedData?.error;
-    if (error) {
-      throw new Error(error || "Unknown server error");
-    }
-  }
   return event;
 };
