@@ -1,8 +1,7 @@
 /**
  * Functional HTTP interceptor that adds retry-on-failure handling for
- * streamed requests (plain JSON objects), identified via
- * the `STREAMING_RESPONSE` context token set by `Requests.makeStreamRequest`
- * (../Services/requests.ts).
+ * streamed NDJSON requests, identified via the `STREAMING_RESPONSE` context
+ * token set on the request. Retry and timeout settings come from `STREAM_CONFIG`.
  */
 import { throwError } from "rxjs";
 import {

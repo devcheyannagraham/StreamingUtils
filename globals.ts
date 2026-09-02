@@ -49,9 +49,9 @@ export const streamSubscription = <T>({
   completeCB?: Function;
 } = {}): any => {
   return {
-    // only forward data to the nextCB
+    // Forward parsed event data to the next callback.
     next: (event: HttpEvent<T>) => {
-      //   extracts parsed data here to prevent @ts-ignore errors everywhere
+      // The interceptor adds parsedData to streamed HTTP events.
       // @ts-ignore
       const parsedData = event?.parsedData || {};
       if (nextCB) nextCB(parsedData, event);
@@ -71,7 +71,7 @@ export const streamSubscription = <T>({
   };
 };
 
-/** Creates a retry callback with linear backoff and jitter from the request's delay settings. */
+/** Creates the retry callback used by RxJS, with linear backoff and jitter from request settings. */
 function delayNotifier({
   delay = DEFAULT_STREAM_CONFIG.delay,
   maxDelay = DEFAULT_STREAM_CONFIG.maxDelay,
@@ -93,7 +93,7 @@ function delayNotifier({
   };
 }
 
-/** Throws the server's in-band error marker so the interceptor's retry and error handlers react to it. */
+/** Throws a parsed in-band server error so the interceptor's retry and error handlers can process it. */
 function serverErrorCheck(event: HttpEvent<any>) {
   if (event.type === HttpEventType.DownloadProgress) {
     // @ts-ignore
