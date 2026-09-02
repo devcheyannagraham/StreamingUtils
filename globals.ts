@@ -7,9 +7,10 @@ import {
   HttpContextToken,
   HttpEvent,
   HttpEventType,
+  HttpErrorResponse,
 } from "@angular/common/http";
 
-import { Observable, Observer, throwError, timer } from "rxjs";
+import { Observable, throwError, timer } from "rxjs";
 
 /** Marks a request as a long-lived streamed response so the interceptor applies retry and timeout handling. */
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
@@ -35,37 +36,37 @@ export const STREAM_CONFIG = new HttpContextToken<StreamConfig>(() => ({
 }));
 
 /**
- * Builds the Observer for a streamed HTTP request: logs whatever value
- * arrives (already parsed by `retryInterceptor`) and forwards it to the
- * caller via callbacks, since an Observer's `next`/`error` return values are
- * discarded by RxJS and can't hand data back directly. `nextCB` gets each
- * emitted value, `errorCB` gets the raw error, `completeCB` fires when the
- * stream ends.
+ * Builds an Observer for a streamed HTTP request and forwards each parsed
+ * payload of type `T` to the caller's callbacks. The generic keeps the
+ * callback payload aligned with the application's stream response shape.
+ * `errorCB` receives the terminal error and `completeCB` runs when the stream ends.
+ * @typeParam T Parsed payload type delivered to `nextCB`.
  */
-export const streamSubscription = ({
+export const streamSubscription = <T>({
   nextCB,
   errorCB,
   completeCB,
 }: {
-  nextCB?: StreamEventFunction;
-  errorCB?: (error: any) => any | void;
+  nextCB?: StreamEventFunction<T>;
+  errorCB?: (error?: Error | HttpErrorResponse) => any | void;
   completeCB?: Function;
-} = {}): Partial<Observer<HttpEvent<string>>> => {
+} = {}): any => {
   return {
     // only forward data to the nextCB
-    next: (event) => {
+    next: (event: HttpEvent<T>) => {
       //   extracts parsed data here to prevent @ts-ignore errors everywhere
       // @ts-ignore
       const parsedData = event?.parsedData || {};
       if (nextCB) nextCB(parsedData, event);
     },
-    error: (error) => {
-      if (error.status === 0) {
+    error: (error?: Error | HttpErrorResponse) => {
+      if (error instanceof HttpErrorResponse && error.status === 0) {
         console.error("Request timed out");
-        if (errorCB) errorCB("Request timed out: " + error);
-      } else {
-        if (errorCB) errorCB(error);
+        errorCB?.(new Error("Request timed out: " + error.message));
+        return;
       }
+
+      errorCB?.(error);
     },
     complete: () => {
       if (completeCB) completeCB();
@@ -74,8 +75,12 @@ export const streamSubscription = ({
 };
 
 /** Creates a retry callback with linear backoff and jitter from the request's delay settings. */
-const delayNotifier: DelayNotifierType = ({ delay = DEFAULT_DELAY, maxDelay = DEFAULT_MAX_DELAY, jitter = DEFAULT_JITTER }) => {
-  return (error: Error, retryCount: number) => {
+const delayNotifier: DelayNotifierType = ({
+  delay = DEFAULT_DELAY,
+  maxDelay = DEFAULT_MAX_DELAY,
+  jitter = DEFAULT_JITTER,
+}) => {
+  return (error?: Error, retryCount: number = DEFAULT_RETRY_COUNT) => {
     const currentDelay =
       retryCount * delay + Math.floor(Math.random() * jitter);
 
@@ -108,16 +113,9 @@ const defaultErrorHandler = (error: Error): Observable<never> => {
   return throwError(() => error);
 };
 
-export type ParsedData = {
-  retry?: any;
-  error?: any;
-  responseData?: any;
-  done?: any;
-};
-
-export type StreamEventFunction = (
-  parsedData?: ParsedData,
-  event?: HttpEvent<any>,
+export type StreamEventFunction<T> = (
+  parsedData?: T,
+  event?: HttpEvent<T>,
 ) => any | void;
 
 export type StreamConfig = {
@@ -140,4 +138,4 @@ export type DelayNotifierType = ({
   delay?: number;
   maxDelay?: number;
   jitter?: number;
-}) => (error: Error, retryCount: number) => Observable<any>;
+}) => (error?: Error, retryCount?: number) => Observable<any>;
