@@ -1,7 +1,8 @@
 /**
  * Functional HTTP interceptor that adds retry-on-failure handling for
  * streamed requests (plain JSON objects), identified via
- * the `STREAMING_RESPONSE` context token set on the request.
+ * the `STREAMING_RESPONSE` context token set by `Requests.makeStreamRequest`
+ * (../Services/requests.ts).
  */
 import { throwError } from "rxjs";
 import {
@@ -9,7 +10,11 @@ import {
   HttpInterceptorFn,
   HttpEvent,
 } from "@angular/common/http";
-import { STREAM_CONFIG, STREAMING_RESPONSE } from "./globals.js";
+import {
+  DEFAULT_STREAM_CONFIG,
+  STREAM_CONFIG,
+  STREAMING_RESPONSE,
+} from "./globals.js";
 import { timeout, retry, map, catchError } from "rxjs/operators";
 
 /**
@@ -25,7 +30,10 @@ import { timeout, retry, map, catchError } from "rxjs/operators";
  */
 export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
   // Read this request's configuration, including the context token's defaults.
-  const config = req.context.get(STREAM_CONFIG);
+  const config = Object.assign(
+    DEFAULT_STREAM_CONFIG,
+    req.context.get(STREAM_CONFIG),
+  );
 
   if (req.context.get(STREAMING_RESPONSE)) {
     let partialTextLength = 0;
