@@ -24,27 +24,26 @@ export const streamSubscription = ({
   completeCB,
 }: {
   nextCB?: StreamEventFunction;
-  errorCB?: Function;
+  errorCB?: (error: any) => any | void;
   completeCB?: Function;
 } = {}): Partial<Observer<HttpEvent<string>>> => {
   return {
     // only forward data to the nextCB
     next: (event) => {
-      // @ts-ignore
       //   extracts parsed data here to prevent @ts-ignore errors everywhere
+      // @ts-ignore
       const parsedData = event?.parsedData || {};
       if (nextCB) nextCB(parsedData, event);
     },
     error: (error) => {
       if (error.status === 0) {
-        console.error("POST stream request error: Request timed out");
+        console.error("Request timed out");
+        if (errorCB) errorCB("Request timed out: " + error);
       } else {
-        console.error("POST stream request error:", error);
+        if (errorCB) errorCB(error);
       }
-      if (errorCB) errorCB(error);
     },
     complete: () => {
-      console.log("POST stream request completed");
       if (completeCB) completeCB();
     },
   };

@@ -1,8 +1,12 @@
 # StreamingUtils
 
+**Purpose:** Server-Sent Events only work over GET requests, so there's no standard way to stream a response back for a POST. This package makes that possible: it lets you send a POST request and consume its response as a stream of NDJSON chunks instead of waiting for the full body.
+
 Helpers for consuming server-sent [NDJSON](http://ndjson.org/) (newline-delimited JSON) streams from POST requests in an Angular app, built on Angular's `HttpClient` and RxJS.
 
 Servers can't change the HTTP status code mid-response (headers commit to `200` before the body streams), so this package expects the server to write its body as NDJSON — plain JSON objects separated by `\n` — and to signal failures with an in-band `{ "error": "..." }` message. `HTTPStreamInterceptor` is an Angular `HttpInterceptorFn` that buffers and parses those chunks, detects the error marker, and retries the request with backoff; `streamSubscription` gives you a simple callback-based `Observer` to consume the parsed data from Angular's `HttpClient`.
+
+The interceptor also retries on transient connection failures — not just the in-band error marker. A per-chunk timeout (5s) plus retry-with-backoff (up to 3 attempts) means a lost connection, stalled response, or dropped socket mid-stream is caught and retried automatically, without the caller having to handle it.
 
 ## Installation
 

@@ -4,10 +4,15 @@
  * the `STREAMING_RESPONSE` context token set by `Requests.makeStreamRequest`
  * (../Services/requests.ts).
  */
-import { throwError, timer } from 'rxjs';
-import { HttpEventType, HttpHandlerFn, HttpRequest, HttpEvent } from '@angular/common/http';
-import { STREAMING_RESPONSE } from './globals.js';
-import { timeout, retry, map, catchError } from 'rxjs/operators';
+import { throwError, timer } from "rxjs";
+import {
+  HttpEventType,
+  HttpHandlerFn,
+  HttpRequest,
+  HttpEvent,
+} from "@angular/common/http";
+import { STREAMING_RESPONSE } from "./globals.js";
+import { timeout, retry, map, catchError } from "rxjs/operators";
 
 /**
  * Detects the server's in-band error marker in a streamed response and
@@ -20,15 +25,25 @@ import { timeout, retry, map, catchError } from 'rxjs/operators';
  * JSON messages), this buffers partial text until each message is complete
  * before parsing it.
  */
-export const HTTPStreamInterceptor = (req: HttpRequest<any>, next: HttpHandlerFn) => {
+export const HTTPStreamInterceptor = (
+  req: HttpRequest<any>,
+  next: HttpHandlerFn,
+) => {
   if (req.context.get(STREAMING_RESPONSE)) {
     let partialTextLength = 0; // Track the length of the partial text received so far
-    let buffer: string = '';
+    let buffer: string = "";
 
     return next(req).pipe(
       //  Intercept and parse data, throwing error upstream if the server signals an in-band error mid-stream.
       map((event) => bufferData(event, buffer, partialTextLength)),
-      timeout({ each: 5000 }),
+      map((event) => serverErrorCheck(event)),
+      timeout({
+        each: 5000,
+        // retry downstream catches this error and sends to delay notifier.
+        with: (info) => {
+          return throwError(() => new Error("Chunk Request timed out"));
+        },
+      }),
       retry({ count: 3, delay: delayNotifier() }),
       catchError(defaultErrorHandler),
     );
@@ -51,22 +66,31 @@ const delayNotifier = ({
   jitter?: number;
 } = {}) => {
   return (error: any, retryCount: any) => {
-    // Guard clause: bail out of retrying once the configured delay ceiling is exceeded.
-    if (delay > maxDelay) {
-      return throwError(() => new Error('Maximum delay exceeded'));
-    }
-    const currentDelay = retryCount * delay + Math.floor(Math.random() * jitter);
+    const currentDelay =
+      retryCount * delay + Math.floor(Math.random() * jitter);
 
-    console.log(`Client Retrying request after ${currentDelay}ms (retry count: ${retryCount})`);
+    // Guard clause: bail out of retrying once the configured delay ceiling is exceeded.
+    if (currentDelay > maxDelay) {
+      return throwError(() => new Error("Maximum delay exceeded"));
+    }
+
+    console.warn(
+      `${error}:\nClient Retrying request after ${currentDelay}ms (retry count: ${retryCount})`,
+    );
     return timer(currentDelay);
   };
 };
 
 const defaultErrorHandler = (error: any) => {
+  // Gets fired after retries are exhausted, or for non-streaming requests.
   return throwError(() => error);
 };
 
-const bufferData = (event: HttpEvent<any>, buffer: string, partialTextLength: number) => {
+const bufferData = (
+  event: HttpEvent<any>,
+  buffer: string,
+  partialTextLength: number,
+) => {
   let stringChunks = [];
   let dataChunk: any;
   if (event.type === HttpEventType.DownloadProgress && event.partialText) {
@@ -74,12 +98,12 @@ const bufferData = (event: HttpEvent<any>, buffer: string, partialTextLength: nu
     buffer += event.partialText.slice(partialTextLength);
 
     // Extract complete, newline-delimited JSON messages from the buffer.
-    stringChunks = buffer.split('\n');
+    stringChunks = buffer.split("\n");
 
     // handle incomplete data
-    let lastStringChunk = stringChunks.pop() || '';
-    if (lastStringChunk?.trim() == '') {
-      buffer = '';
+    let lastStringChunk = stringChunks.pop() || "";
+    if (lastStringChunk?.trim() == "") {
+      buffer = "";
     } else {
       // assign remaining data to buffer for next chunk
       buffer = lastStringChunk;
@@ -94,15 +118,14 @@ const bufferData = (event: HttpEvent<any>, buffer: string, partialTextLength: nu
         parsedChunk = JSON.parse(chunk);
       } catch (error) {
         // this error is not retried
-        return { ...acc, error: 'Error parsing JSON chunk', chunk: chunk };
+        return { ...acc, parseError: "Error parsing JSON chunk", chunk: chunk };
       }
 
       // detect in-band error marker and throw upstream if found, so retry logic can handle it.
       // only catch server errors. The server sends `error` as a plain string (see server.ts),
       // since JSON.stringify on an Error object drops message/stack (they're non-enumerable).
       if (parsedChunk?.error) {
-        console.error('server error', parsedChunk);
-        throw new Error(parsedChunk.error || 'Unknown server error');
+        throw new Error(parsedChunk.error || "Unknown server error");
       } else {
         return { ...acc, ...parsedChunk };
       }
@@ -114,9 +137,20 @@ const bufferData = (event: HttpEvent<any>, buffer: string, partialTextLength: nu
   } else if (event.type === HttpEventType.Sent) {
     // new request, reset partialTextLength
     partialTextLength = 0;
-    buffer = '';
+    buffer = "";
   }
   // @ts-ignore
-  event['parsedData'] = dataChunk;
+  event["parsedData"] = dataChunk;
+  return event;
+};
+
+const serverErrorCheck = (event: HttpEvent<any>) => {
+  if (event.type === HttpEventType.DownloadProgress) {
+    // @ts-ignore
+    const error = event?.parsedData?.error;
+    if (error) {
+      throw new Error(error || "Unknown server error");
+    }
+  }
   return event;
 };
