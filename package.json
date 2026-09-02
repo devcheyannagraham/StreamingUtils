@@ -1,6 +1,6 @@
 {
   "name": "@chey.dev/streamingutils",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "the package contains helpers to stream posts requests in an angular ecosystem using httpclient",
   "homepage": "https://github.com/devcheyannagraham/StreamingUtils#readme",
   "bugs": {
