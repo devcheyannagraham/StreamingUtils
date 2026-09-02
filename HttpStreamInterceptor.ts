@@ -30,10 +30,10 @@ import { timeout, retry, map, catchError } from "rxjs/operators";
  */
 export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
   // Read this request's configuration, including the context token's defaults.
-  const config = Object.assign(
-    DEFAULT_STREAM_CONFIG,
-    req.context.get(STREAM_CONFIG),
-  );
+  const config = {
+    ...DEFAULT_STREAM_CONFIG,
+    ...req.context.get(STREAM_CONFIG),
+  };
 
   if (req.context.get(STREAMING_RESPONSE)) {
     let partialTextLength = 0;

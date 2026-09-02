@@ -16,7 +16,7 @@ import { Observable, throwError, timer } from "rxjs";
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
 
 /** Supplies default retry, timeout, parsing, and error-handling behavior for each request. */
-export const DEFAULT_STREAM_CONFIG = {
+export const DEFAULT_STREAM_CONFIG: StreamConfig = {
   delay: 1000,
   maxDelay: 300000,
   jitter: 500,
