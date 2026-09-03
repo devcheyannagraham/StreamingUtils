@@ -188,6 +188,123 @@ this.http
 | `serverErrorCheck` | `(event: HttpEvent<any>) => HttpEvent<any>` | *in-band check* | Checks chunk payload for in-band `{ error: "..." }` markers. |
 | `chunkTimeoutHandler` | `(error: Error) => Observable<never>` | *rethrow* | Fallback error handler triggered when chunk timeout occurs. |
 
+### Customizing Retry & Timeout Values (Without Writing Custom Objects)
+
+If you only want to change timing values (retry count, delay duration, chunk timeouts) without writing custom RxJS retry objects or functions, simply pass the individual properties:
+
+#### Per-Request:
+```ts
+import { HttpClient, HttpContext } from "@angular/common/http";
+import { STREAMING_RESPONSE, STREAM_CONFIG } from "@chey.dev/streamingutils/globals";
+
+// Customizes retry timing for this specific request only
+this.http.post("/api/stream", {}, {
+  context: new HttpContext()
+    .set(STREAMING_RESPONSE, true)
+    .set(STREAM_CONFIG, {
+      maxRetryCount: 5,     // Retry up to 5 times (default is 3)
+      delay: 2_000,         // Base delay of 2s between retries (default is 1s)
+      maxDelay: 10_000,     // Cap maximum delay at 10s (default is 5s)
+      jitter: 250,          // Random jitter up to 250ms (default is 500ms)
+      chunkTimeout: 10_000, // Wait up to 10s between chunks (default is 7s)
+    }),
+  reportProgress: true,
+  observe: "events",
+  responseType: "text",
+});
+```
+
+#### Globally for the Entire Application:
+```ts
+import { setDefaultConfig } from "@chey.dev/streamingutils/globals";
+
+// Adjusts defaults across all streaming requests in the app
+setDefaultConfig({
+  maxRetryCount: 5,
+  delay: 2_000,
+  maxDelay: 10_000,
+  chunkTimeout: 10_000,
+});
+```
+
+The interceptor will automatically construct the RxJS retry and timeout pipelines using your values.
+
+---
+
+### Custom Retry Delays (`DelayNotifierType`)
+
+`DelayNotifierType` is a higher-order factory function used to customize retry timing and retry conditions.
+
+#### Signature
+```ts
+export type DelayNotifierType = ({
+  delay,
+  maxDelay,
+  jitter,
+  maxRetryCount,
+}: {
+  delay: number;
+  maxDelay: number;
+  jitter: number;
+  maxRetryCount: number;
+}) => (error?: Error, retryCount?: number) => Observable<any>;
+```
+
+1. The **outer function** receives the configured timing settings (`delay`, `maxDelay`, `jitter`, `maxRetryCount`).
+2. The **returned inner function** is passed to RxJS `retry({ delay: ... })`. It receives the thrown `error` and the current `retryCount` (1-indexed attempt number).
+   - Return `timer(ms)` to wait and schedule the next retry attempt.
+   - Return `throwError(() => error)` or throw an error to immediately abort retries.
+
+#### Example 1: Constant Fixed Delay
+```ts
+import { timer } from "rxjs";
+import { type DelayNotifierType } from "@chey.dev/streamingutils/globals";
+
+// Retries every 2 seconds regardless of attempt count
+const fixedDelayNotifier: DelayNotifierType = () => {
+  return (error, retryCount) => {
+    console.log(`Retrying attempt #${retryCount} after 2000ms`);
+    return timer(2000);
+  };
+};
+```
+
+#### Example 2: Exponential Backoff with Max Ceiling
+```ts
+import { throwError, timer } from "rxjs";
+import { type DelayNotifierType } from "@chey.dev/streamingutils/globals";
+
+// Exponential backoff: 1s, 2s, 4s, 8s... capped at maxDelay
+const exponentialBackoff: DelayNotifierType = ({ delay, maxDelay }) => {
+  return (error, retryCount = 1) => {
+    const calculatedDelay = Math.min(delay * Math.pow(2, retryCount - 1), maxDelay);
+
+    console.warn(`Retry attempt #${retryCount} scheduled in ${calculatedDelay}ms`);
+    return timer(calculatedDelay);
+  };
+};
+```
+
+#### Example 3: Selective Retries by Error Type
+```ts
+import { throwError, timer } from "rxjs";
+import { type DelayNotifierType } from "@chey.dev/streamingutils/globals";
+
+// Only retry for server errors, abort immediately for unauthorized or client errors
+const selectiveRetryNotifier: DelayNotifierType = ({ delay }) => {
+  return (error, retryCount = 1) => {
+    // Abort retry if error message indicates an unrecoverable client issue
+    if (error?.message?.includes("Unauthorized") || error?.message?.includes("403")) {
+      return throwError(() => new Error("Aborting retries due to authentication failure"));
+    }
+
+    return timer(delay);
+  };
+};
+```
+
+You can pass your custom notifier globally via `setDefaultConfig({ delayNotifier: exponentialBackoff })` or per request via `STREAM_CONFIG`.
+
 ---
 
 ### Advanced RxJS Customization
@@ -273,6 +390,7 @@ The interceptor detects `{ error: string }`, throws an error internally, and tri
 | `streamSubscription<T>` | `globals` | Observer factory delivering parsed stream payloads of type `T` to callbacks. |
 | `debug` | `globals` | `WritableSignal<boolean>` toggle controlling `HSI:` debug logging to the console. |
 | `StreamConfig` | `globals` | Configuration interface for retry, timeout, backoff, and error handling. |
+| `DelayNotifierType` | `globals` | Higher-order factory function type for generating custom RxJS retry delay notifiers. |
 
 ---
 
