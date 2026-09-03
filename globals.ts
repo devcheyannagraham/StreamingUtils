@@ -1,7 +1,7 @@
 /**
- * Shared HttpContext tokens for flagging requests to interceptors, plus the
- * `streamSubscription` observer factory used to consume streamed, back-to-back
- * JSON responses.
+ * Shared HttpContext tokens for flagging requests to interceptors, default
+ * stream configuration defaults, and the `streamSubscription` observer factory
+ * used to consume streamed, newline-delimited JSON responses.
  */
 import {
   HttpContextToken,
@@ -9,6 +9,7 @@ import {
   HttpEventType,
   HttpErrorResponse,
 } from "@angular/common/http";
+import { signal, WritableSignal } from "@angular/core";
 
 import {
   Observable,
@@ -18,11 +19,28 @@ import {
   timer,
 } from "rxjs";
 
+/**
+ * Reactive Angular signal to enable or disable debug logging across the streaming utilities.
+ * Defaults to `false`.
+ */
+export const debug: WritableSignal<boolean> = signal(false);
+
+/**
+ * Conditionally logs debug messages prefixed with `HSI:` when debug mode is enabled.
+ * Why: Centralizes logging output to avoid cluttered console output in production while aiding diagnosis during development.
+ * @param args Arbitrary items or messages to log to the console.
+ */
+export const logDebug = (...args: any[]): void => {
+  if (debug()) {
+    console.log("HSI:", ...args);
+  }
+};
+
 /** Marks a request as a long-lived streamed response so the interceptor applies retry and timeout handling. */
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
 
-/** Supplies default retry, timeout, parsing, and error-handling behavior for each request. */
-export const DEFAULT_STREAM_CONFIG: StreamConfig = {
+/** Supplies default retry, timeout, and error-handling configuration for streaming requests. */
+let defaultStreamConfig: StreamConfig = {
   delay: 1_000,
   maxDelay: 5_000,
   jitter: 500,
@@ -37,8 +55,30 @@ export const DEFAULT_STREAM_CONFIG: StreamConfig = {
   serverErrorCheck: serverErrorCheck,
 };
 
+/**
+ * Updates the module-level default stream configuration by merging provided options into `defaultStreamConfig`.
+ * Why: Allows consumers to set application-wide default streaming behavior once during app bootstrap.
+ * @param config Partial stream configuration containing custom override values.
+ */
+export const setDefaultConfig = (config: Partial<StreamConfig>): void => {
+  defaultStreamConfig = {
+    ...defaultStreamConfig,
+    ...config,
+  };
+};
+
+/**
+ * Returns a shallow copy of the current module-level default stream configuration.
+ * Why: Allows consumers and interceptors to inspect active defaults without exposing the internal configuration object to direct external mutation.
+ * @returns A clone of the current global `StreamConfig`.
+ */
+export const getDefaultConfig = (): StreamConfig => {
+  return { ...defaultStreamConfig };
+};
+
+/** Request-scoped HttpContext token providing customized stream configuration overrides. */
 export const STREAM_CONFIG = new HttpContextToken<Partial<StreamConfig>>(
-  () => DEFAULT_STREAM_CONFIG,
+  () => defaultStreamConfig,
 );
 
 /**
@@ -47,6 +87,8 @@ export const STREAM_CONFIG = new HttpContextToken<Partial<StreamConfig>>(
  * callback payload aligned with the application's stream response shape.
  * `errorCB` receives the terminal error and `completeCB` runs when the stream ends.
  * @typeParam T Parsed payload type delivered to `nextCB`.
+ * @param callbacks Optional callbacks for next, error, and complete notifications.
+ * @returns Observer object compatible with RxJS subscription methods.
  */
 export const streamSubscription = <T>({
   nextCB,
@@ -63,11 +105,16 @@ export const streamSubscription = <T>({
       // The interceptor adds parsedData to streamed HTTP events.
       // @ts-ignore
       const parsedData = event?.parsedData || {};
+      logDebug("streamSubscription: next event received", {
+        event,
+        parsedData,
+      });
       if (nextCB) nextCB(parsedData, event);
     },
     error: (error?: Error | HttpErrorResponse) => {
+      logDebug("streamSubscription: error received", error);
       if (error instanceof HttpErrorResponse && error.status === 0) {
-        console.error("Request timed out");
+        logDebug("streamSubscription: Request timed out (status 0)");
         errorCB?.(new Error("Request timed out: " + error.message));
         return;
       }
@@ -75,48 +122,75 @@ export const streamSubscription = <T>({
       errorCB?.(error);
     },
     complete: () => {
+      logDebug("streamSubscription: stream completed");
       if (completeCB) completeCB();
     },
   };
 };
 
-/** Creates the retry callback used by RxJS, with linear backoff and jitter from request settings. */
+/**
+ * Creates the retry delay callback factory used by RxJS `retry`, applying linear backoff with random jitter.
+ * Why: Spreads retry attempts over time to prevent hammering an overloaded or failing server.
+ * @param config Timing and retry limit settings.
+ * @returns Delay notifier function taking the error and current retry attempt count, returning a timer Observable or throwing on ceiling breach.
+ */
 function delayNotifier({
-  delay = DEFAULT_STREAM_CONFIG.delay,
-  maxDelay = DEFAULT_STREAM_CONFIG.maxDelay,
-  jitter = DEFAULT_STREAM_CONFIG.jitter,
-  maxRetryCount = DEFAULT_STREAM_CONFIG.maxRetryCount,
+  delay = defaultStreamConfig.delay,
+  maxDelay = defaultStreamConfig.maxDelay,
+  jitter = defaultStreamConfig.jitter,
+  maxRetryCount = defaultStreamConfig.maxRetryCount,
 }) {
   return (error?: Error, retryCount: number = maxRetryCount) => {
     const currentDelay =
       retryCount * delay + Math.floor(Math.random() * jitter);
 
+    logDebug("delayNotifier: Calculating retry delay", {
+      retryCount,
+      currentDelay,
+      maxDelay,
+      errorMessage: error?.message,
+    });
+
     // Stop scheduling retries after the configured delay ceiling is exceeded.
     if (currentDelay > maxDelay) {
+      logDebug("delayNotifier: Maximum delay exceeded, terminating retries");
       return throwError(() => new Error("Maximum delay exceeded"));
     }
 
-    console.warn(
-      `${error?.message}:\nClient Retrying request after ${currentDelay}ms (retry count: ${retryCount})`,
+    logDebug(
+      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${error?.message}`,
     );
     return timer(currentDelay);
   };
 }
 
-/** Throws a parsed in-band server error so the interceptor's retry and error handlers can process it. */
+/**
+ * Inspects `DownloadProgress` events for in-band error messages emitted by the backend and throws if found.
+ * Why: Server streams return HTTP 200 before errors occur, so failures must be detected from chunk contents and thrown so RxJS retry and error pipelines trigger.
+ * @param event Incoming HTTP event to inspect.
+ * @returns The original `event` if no in-band error was present.
+ * @throws `Error` When an in-band error marker exists on `event.parsedData`.
+ */
 function serverErrorCheck(event: HttpEvent<any>) {
   if (event.type === HttpEventType.DownloadProgress) {
     // @ts-ignore
     const error = event?.parsedData?.error;
     if (error) {
+      logDebug("serverErrorCheck: In-band server error detected", error);
       throw new Error(error || "Unknown server error");
     }
   }
   return event;
 }
 
-/** Rethrows `error` once retries are exhausted, or immediately for non-streaming requests. */
+/**
+ * Default terminal error handler rethrowing errors for downstream consumers.
+ * Why: Ensures unhandled errors properly terminate the stream and reach the subscriber's error callback.
+ * @param error Error thrown during request processing or retry exhaustion.
+ * @returns Observable that immediately errors with the provided error.
+ */
 function defaultErrorHandler(error: Error): Observable<never> {
+  logDebug("defaultErrorHandler: Handling terminal error", error);
   return throwError(() => error);
 }
 
@@ -131,11 +205,12 @@ export type StreamConfig = {
   jitter: number;
   chunkTimeout: number;
   maxRetryCount: number;
-  retryConfig: RetryConfig | null;
+  resetOnSuccess?: boolean;
+  retryConfig?: RetryConfig | null;
   timeoutConfig?: number | Date | TimeoutConfig<HttpEvent<any>> | null;
   delayNotifier: DelayNotifierType;
-  errorHandler: (error: Error) => Observable<Error>;
-  serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<Error>;
+  errorHandler: (error: Error) => Observable<never>;
+  serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
   chunkTimeoutHandler: (error: Error) => Observable<never>;
 };
 
@@ -149,4 +224,4 @@ export type DelayNotifierType = ({
   maxDelay: number;
   jitter: number;
   maxRetryCount: number;
-}) => (error?: Error, maxRetryCount?: number) => Observable<any>;
+}) => (error?: Error, retryCount?: number) => Observable<any>;

@@ -1,7 +1,7 @@
 /**
- * Functional HTTP interceptor that adds retry-on-failure handling for
- * streamed NDJSON requests, identified via the `STREAMING_RESPONSE` context
- * token set on the request. Retry and timeout settings come from `STREAM_CONFIG`.
+ * Functional HTTP interceptor that adds retry-on-failure, chunk timeout,
+ * and JSON buffering handling for streamed NDJSON requests identified via
+ * the `STREAMING_RESPONSE` HttpContext token.
  */
 import {
   HttpEventType,
@@ -9,38 +9,48 @@ import {
   HttpEvent,
 } from "@angular/common/http";
 import {
-  DEFAULT_STREAM_CONFIG,
+  getDefaultConfig,
   STREAM_CONFIG,
   STREAMING_RESPONSE,
+  logDebug,
 } from "./globals.js";
 import { timeout, retry, map, catchError } from "rxjs/operators";
 
 /**
- * Detects the server's in-band error marker in a streamed response and
- * retries the request when it appears. Why: the response headers commit the
- * HTTP status to `200` before any error can occur, so the server can't
- * signal a mid-stream failure via status code — it has to write an in-band
- * marker instead, which isn't something the browser's normal error handling
- * reacts to on its own. Since one server write can straddle multiple
- * `DownloadProgress` chunks (or a chunk can contain several newline-delimited
- * JSON messages), this buffers partial text until each message is complete
- * before parsing it.
+ * Intercepts HTTP requests and manages retry, timeout, buffering, and error handling for streamed NDJSON endpoints.
+ * Why: Stream responses commit HTTP status 200 early in the header phase, requiring in-band error detection and stream chunk buffering over partial text deliveries.
+ * @param req Angular HTTP request object to inspect and handle.
+ * @param next Next interceptor or HTTP backend handler in the pipeline.
+ * @returns Observable stream of HTTP events with parsed JSON data chunks and retry/timeout mechanics applied.
  */
 export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
   if (req.context.get(STREAMING_RESPONSE)) {
-    // Read this request's configuration, including the context token's defaults.
+    logDebug(
+      "HTTPStreamInterceptor: Intercepting streaming request",
+      req.urlWithParams,
+    );
+    // Read this request's configuration, merging context token overrides over library defaults.
     const config = {
-      ...DEFAULT_STREAM_CONFIG,
+      ...getDefaultConfig(),
       ...req.context.get(STREAM_CONFIG),
     };
+    // Use custom retryConfig if provided; otherwise assemble config from individual parameters.
     let retryConfig = config?.retryConfig || {
       count: config.maxRetryCount,
       delay: config.delayNotifier(config),
+      resetOnSuccess: config?.resetOnSuccess,
     };
+    // Use custom timeoutConfig if provided; otherwise construct default chunk timeout configuration.
     let timeoutConfig = config?.timeoutConfig || {
       each: config.chunkTimeout,
       with: config.chunkTimeoutHandler,
     };
+
+    logDebug("HTTPStreamInterceptor: Active streaming configuration", {
+      retryConfig,
+      timeoutConfig,
+      maxRetryCount: config.maxRetryCount,
+    });
 
     let partialTextLength = 0;
     let buffer: string = "";
@@ -55,17 +65,24 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
     );
   }
 
-  // Non-streaming requests use the request's error handler without stream retries.
+  // Non-streaming requests.
   else {
-    return next(req).pipe(catchError(DEFAULT_STREAM_CONFIG.errorHandler));
+    logDebug(
+      "HTTPStreamInterceptor: Passing through non-streaming request",
+      req.urlWithParams,
+    );
+    return next(req);
   }
 };
 
 /**
- * Buffers a streamed `DownloadProgress` event's text until each newline-delimited
- * JSON message is complete, then parses and merges those messages onto `event.parsedData`.
- * Why: one event's `partialText` can end mid-message, or contain several messages,
- * so parsing per-event instead of per-message would throw on partial JSON or drop data.
+ * Buffers streamed `DownloadProgress` chunks until complete newline-delimited JSON messages are formed, then parses and attaches them to `event.parsedData`.
+ * Why: Server data packets can arrive in fragments across multiple `DownloadProgress` events; buffering prevents premature JSON parsing errors on split chunks. Also resets buffer state on new request initiation (`HttpEventType.Sent`).
+ * @param event Incoming HTTP event to process.
+ * @param buffer Accumulated string buffer containing partial or unparsed chunk data.
+ * @param partialTextLength Character index offset tracking previously read text from `event.partialText`.
+ * @returns The HTTP event enriched with parsed payload data attached to `event.parsedData`.
+ * @throws `Error` When an in-band server error property is encountered inside a parsed JSON chunk.
  */
 const bufferData = (
   event: HttpEvent<any>,
@@ -76,7 +93,12 @@ const bufferData = (
   let dataChunk: any;
   if (event.type === HttpEventType.DownloadProgress && event.partialText) {
     // only add new stuff to buffer
-    buffer += event.partialText.slice(partialTextLength);
+    const newSlice = event.partialText.slice(partialTextLength);
+    buffer += newSlice;
+    logDebug("bufferData: Received DownloadProgress chunk slice", {
+      newSliceLength: newSlice.length,
+      totalPartialTextLength: event.partialText.length,
+    });
 
     // Extract complete, newline-delimited JSON messages from the buffer.
     stringChunks = buffer.split("\n");
@@ -88,6 +110,7 @@ const bufferData = (
     } else {
       // assign remaining data to buffer for next chunk
       buffer = lastStringChunk;
+      logDebug("bufferData: Incomplete chunk retained in buffer", buffer);
     }
 
     // convert string chunks to JSON objects
@@ -98,6 +121,7 @@ const bufferData = (
       try {
         parsedChunk = JSON.parse(chunk);
       } catch (error) {
+        logDebug("bufferData: JSON parse error on chunk", { chunk, error });
         // this error is not retried
         return { ...acc, parseError: "Error parsing JSON chunk", chunk: chunk };
       }
@@ -106,6 +130,10 @@ const bufferData = (
       // only catch server errors. The server sends `error` as a plain string (see server.ts),
       // since JSON.stringify on an Error object drops message/stack (they're non-enumerable).
       if (parsedChunk?.error) {
+        logDebug(
+          "bufferData: In-band server error detected in chunk",
+          parsedChunk.error,
+        );
         throw new Error(parsedChunk.error || "Unknown server error");
       } else {
         return { ...acc, ...parsedChunk };
@@ -114,10 +142,17 @@ const bufferData = (
 
     // Track last read position so the next chunk doesn't re-parse the same data.
     partialTextLength = event.partialText.length;
+    logDebug("bufferData: Successfully processed chunks", {
+      dataChunk,
+      bufferRemaining: buffer,
+    });
   } else if (event.type === HttpEventType.Sent) {
     // new request, reset partialTextLength
     partialTextLength = 0;
     buffer = "";
+    logDebug(
+      "bufferData: HttpEventType.Sent event received, reset buffer state",
+    );
   }
   // @ts-ignore
   event["parsedData"] = dataChunk;

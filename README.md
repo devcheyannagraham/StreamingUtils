@@ -1,270 +1,280 @@
 # @chey.dev/streamingutils
 
-Helpers for consuming newline-delimited JSON (NDJSON) streams from Angular `HttpClient` requests.
+Helpers for consuming and parsing newline-delimited JSON (NDJSON) streams with Angular's `HttpClient`, featuring built-in buffering, configurable chunk timeouts, and automatic retry handling for network, transient, and in-band server errors.
 
-## What this package does
+## Features
 
-Normal HTTP responses are usually delivered after the complete body arrives. This package supports a long-lived `POST` request whose response is delivered as several JSON objects while the connection remains open.
-
-It provides two pieces:
-
-- `HTTPStreamInterceptor` buffers and parses newline-delimited JSON, detects in-band server errors, and retries failed streams.
-- `streamSubscription<T>` creates a typed RxJS `Observer` that forwards each parsed payload to callbacks.
-
-### Why errors are sent in the response body
-
-Once a server sends response headers, the HTTP status is committed. A server cannot change a successful `200` response to `500` halfway through the body. The server therefore sends failures as a normal NDJSON message:
-
-```json
-{"error":"The stream failed"}
-```
-
-The interceptor detects that message and throws it inside the RxJS pipeline, where retry handling can process it.
+- **Automated NDJSON Parsing & Buffering:** Handles split chunks and merges parsed JSON objects onto incoming Angular `HttpEvent` objects (`event.parsedData`).
+- **In-Band Error Detection:** Detects `{ "error": "..." }` server payloads sent during an active stream (where HTTP status is committed to 200) and routes them into RxJS retry pipelines.
+- **Resilient Retry & Timeout Logic:** Configurable linear backoff with random jitter, chunk timeouts, and full compatibility with RxJS `RetryConfig` and `TimeoutConfig`.
+- **Global & Request-Level Config:** Set app-wide defaults at bootstrap or customize behavior per request via `HttpContext`.
+- **Consumer-Friendly Subscription Helper:** `streamSubscription<T>` parses and delivers typed data payloads directly to callbacks.
+- **Debug Mode:** Optional debug logging prefixed with `HSI:` for easy troubleshooting.
 
 ## Requirements
 
-- Angular `@angular/common` and `@angular/core` `21.1.0` or later
-- RxJS `7.8.1`
-- An HTTP server that writes one complete JSON object per line
+- Angular (`@angular/common` and `@angular/core`) `^21.1.0`
+- RxJS `~7.8.0`
 
 ## Installation
-
-Install the package in your Angular application:
 
 ```bash
 npm install @chey.dev/streamingutils
 ```
 
-The package uses Angular and RxJS as peer dependencies. Your application must provide them.
+---
 
 ## Setup
 
-### 1. Register the interceptor once
+### 1. Register the Interceptor
 
-Add the interceptor to the application's `provideHttpClient` configuration. With a standalone Angular application, this is usually `src/app/app.config.ts`:
+Add `HTTPStreamInterceptor` to your application's `provideHttpClient` configuration (typically in `app.config.ts`):
 
 ```ts
-import { ApplicationConfig } from '@angular/core';
-import { provideHttpClient, withInterceptors } from '@angular/common/http';
-import { HTTPStreamInterceptor } from '@chey.dev/streamingutils/HttpStreamInterceptor';
+import { ApplicationConfig } from "@angular/core";
+import { provideHttpClient, withInterceptors } from "@angular/common/http";
+import { HTTPStreamInterceptor } from "@chey.dev/streamingutils/HttpStreamInterceptor";
 
 export const appConfig: ApplicationConfig = {
-  providers: [
-    provideHttpClient(withInterceptors([HTTPStreamInterceptor])),
-  ],
+  providers: [provideHttpClient(withInterceptors([HTTPStreamInterceptor]))],
 };
 ```
 
-Registration is global, but stream behavior only applies to requests marked with `STREAMING_RESPONSE`.
+> **Note:** The interceptor operates globally, but streaming buffering, timeouts, and retry logic only activate for requests explicitly marked with `STREAMING_RESPONSE`. Non-streaming requests pass through unmodified.
 
-### 2. Mark a request as streamed
+---
 
-A streamed request must use:
+### 2. Make a Streaming Request
 
-- `STREAMING_RESPONSE: true` to enable stream handling
-- `observe: 'events'` to expose progress events
-- `reportProgress: true` to emit `DownloadProgress` events
-- `responseType: 'text'` because the body contains NDJSON rather than one JSON document
+To stream a request:
+1. Set the `STREAMING_RESPONSE` context token to `true`.
+2. Set `reportProgress: true`, `observe: 'events'`, and `responseType: 'text'` on Angular's `HttpClient` options.
+3. Subscribe using `streamSubscription<T>`.
 
 ```ts
-import { HttpClient, HttpContext, HttpEventType } from '@angular/common/http';
+import { Injectable } from "@angular/core";
+import { HttpClient, HttpContext, HttpEventType } from "@angular/common/http";
 import {
   STREAMING_RESPONSE,
   streamSubscription,
-} from '@chey.dev/streamingutils/globals';
+} from "@chey.dev/streamingutils/globals";
 
-type StreamChunk = {
-  responseData?: { message: string };
+// Shape of each NDJSON message from the server
+interface StreamPayload {
+  message?: string;
+  count?: number;
   done?: boolean;
-  error?: string;
-};
+}
 
+@Injectable({ providedIn: "root" })
 export class StreamService {
   constructor(private readonly http: HttpClient) {}
 
-  startStream(): void {
-    const context = new HttpContext().set(STREAMING_RESPONSE, true);
-
-    this.http.post('/api/stream', {}, {
-      context,
-      observe: 'events',
-      reportProgress: true,
-      responseType: 'text',
-    }).subscribe(
-      streamSubscription<StreamChunk>({
-        nextCB: (chunk, event) => {
-          if (chunk?.responseData) {
-            console.log('data:', chunk.responseData.message);
-          }
-
-          if (chunk?.done) {
-            console.log('stream finished');
-          }
-
-          if (event?.type === HttpEventType.Response) {
-            console.log('final HTTP response received');
-          }
+  streamData() {
+    return this.http
+      .post(
+        "/api/stream",
+        {},
+        {
+          context: new HttpContext().set(STREAMING_RESPONSE, true),
+          reportProgress: true,
+          observe: "events",
+          responseType: "text",
         },
-        errorCB: (error) => console.error('stream failed:', error),
-        completeCB: () => console.log('request complete'),
-      }),
-    );
+      )
+      .subscribe(
+        streamSubscription<StreamPayload>({
+          nextCB: (data, event) => {
+            if (data?.message) {
+              console.log("Chunk received:", data.message);
+            }
+            if (data?.done) {
+              console.log("Stream completed");
+            }
+            if (event?.type === HttpEventType.Response) {
+              console.log("Final HTTP response received");
+            }
+          },
+          errorCB: (error) => {
+            console.error("Stream failed after retries exhausted:", error);
+          },
+          completeCB: () => {
+            console.log("Stream request finished");
+          },
+        }),
+      );
   }
 }
 ```
 
-`streamSubscription<T>` makes the parsed value passed to `nextCB` a `T`. The generic should describe the JSON objects your server writes, not the raw text response. The second callback argument is the original Angular `HttpEvent`.
+---
 
-## Server response format
+## Configuration
 
-The server must write one complete JSON object followed by `\n` for every message:
+### Global Configuration
 
-```text
-{"responseData":{"message":"first"}}\n
-{"responseData":{"message":"second"}}\n
-{"done":true}\n
-```
-
-An Express route can produce that response as follows:
+Set application-wide defaults once during bootstrap using `setDefaultConfig`:
 
 ```ts
-app.post('/api/stream', async (_req, res) => {
-  res.setHeader('Content-Type', 'application/x-ndjson');
-  res.flushHeaders();
+import { setDefaultConfig } from "@chey.dev/streamingutils/globals";
 
-  res.write(JSON.stringify({
-    responseData: { message: 'first' },
-  }) + '\n');
-
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-
-  res.write(JSON.stringify({
-    responseData: { message: 'second' },
-  }) + '\n');
-
-  res.write(JSON.stringify({ done: true }) + '\n');
-  res.end();
+setDefaultConfig({
+  maxRetryCount: 5,
+  chunkTimeout: 10_000,
+  delay: 1_500,
+  maxDelay: 10_000,
 });
 ```
 
-To signal a mid-stream failure, write an error object and end the response:
+You can inspect the active defaults at any time using `getDefaultConfig`:
 
 ```ts
-res.write(JSON.stringify({ error: 'The upstream service failed' }) + '\n');
-res.end();
+import { getDefaultConfig } from "@chey.dev/streamingutils/globals";
+
+const currentDefaults = getDefaultConfig();
 ```
 
-The error value must be a string. Serializing a JavaScript `Error` object directly usually produces `{}` because its `message` property is not enumerable.
+---
 
-## Per-request configuration
+### Per-Request Configuration
 
-Retry and timeout settings are carried by `STREAM_CONFIG`, an Angular `HttpContextToken`. This makes configuration request-specific instead of changing shared module state.
-
-The default values are:
-
-| Setting | Default | Purpose |
-| --- | ---: | --- |
-| `delay` | `1000` | Base retry delay in milliseconds. |
-| `maxDelay` | `15000` | Maximum calculated retry delay in milliseconds. |
-| `jitter` | `500` | Maximum random jitter added to the retry delay. |
-| `chunkTimeout` | `5000` | Maximum time between streamed chunks in milliseconds. |
-| `requestTimeout` | `30000` | Request-level timeout value available to the caller. |
-| `retryCount` | `3` | Number of retries after the initial request. |
-
-When setting `STREAM_CONFIG`, provide the complete `StreamConfig` object. The token value replaces the default object; it does not deep-merge with it.
+Override settings for an individual request using the `STREAM_CONFIG` context token:
 
 ```ts
-import { HttpContext } from '@angular/common/http';
-import { throwError, timer } from 'rxjs';
+import { HttpClient, HttpContext } from "@angular/common/http";
 import {
-  STREAM_CONFIG,
   STREAMING_RESPONSE,
-  type StreamConfig,
-} from '@chey.dev/streamingutils/globals';
+  STREAM_CONFIG,
+  streamSubscription,
+} from "@chey.dev/streamingutils/globals";
 
-const config: StreamConfig = {
-  delay: 2000,
-  maxDelay: 30000,
-  jitter: 500,
-  chunkTimeout: 10000,
-  requestTimeout: 30000,
-  retryCount: 5,
-  delayNotifier: ({ delay = 2000 }) => {
-    return (_error, retryCount) => timer(retryCount * delay);
-  },
-  errorHandler: (error) => throwError(() => error),
-  serverErrorCheck: (event) => event,
-};
+this.http
+  .post(
+    "/api/stream",
+    {},
+    {
+      context: new HttpContext()
+        .set(STREAMING_RESPONSE, true)
+        .set(STREAM_CONFIG, {
+          maxRetryCount: 5,
+          chunkTimeout: 12_000,
+          delay: 2_000,
+          maxDelay: 15_000,
+        }),
+      reportProgress: true,
+      observe: "events",
+      responseType: "text",
+    },
+  )
+  .subscribe(streamSubscription({ ... }));
+```
+
+---
+
+### Configuration Options (`StreamConfig`)
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `maxRetryCount` | `number` | `3` | Maximum number of retry attempts before giving up. |
+| `delay` | `number` | `1000` | Base delay between retries in milliseconds. |
+| `maxDelay` | `number` | `5000` | Maximum calculated retry delay ceiling in milliseconds. |
+| `jitter` | `number` | `500` | Maximum random jitter in milliseconds added to retry delay. |
+| `chunkTimeout` | `number` | `7000` | Timeout in milliseconds between consecutive streamed chunks. |
+| `resetOnSuccess` | `boolean` | `undefined` | Reset retry count on successful emission (RxJS `retry` option). |
+| `retryConfig` | `RetryConfig \| null` | `null` | Custom RxJS `RetryConfig` object to bypass default backoff calculation. |
+| `timeoutConfig` | `number \| Date \| TimeoutConfig \| null` | `null` | Custom duration, Date, or RxJS `TimeoutConfig` object. |
+| `delayNotifier` | `DelayNotifierType` | *linear backoff* | Factory function producing the retry delay timer Observable. |
+| `errorHandler` | `(error: Error) => Observable<never>` | *rethrow* | Terminal error handler called when retries are exhausted. |
+| `serverErrorCheck` | `(event: HttpEvent<any>) => HttpEvent<any>` | *in-band check* | Checks chunk payload for in-band `{ error: "..." }` markers. |
+| `chunkTimeoutHandler` | `(error: Error) => Observable<never>` | *rethrow* | Fallback error handler triggered when chunk timeout occurs. |
+
+---
+
+### Advanced RxJS Customization
+
+You can supply full RxJS `retryConfig` or `timeoutConfig` objects directly:
+
+```ts
+import { HttpContext } from "@angular/common/http";
+import { throwError } from "rxjs";
+import {
+  STREAMING_RESPONSE,
+  STREAM_CONFIG,
+} from "@chey.dev/streamingutils/globals";
 
 const context = new HttpContext()
   .set(STREAMING_RESPONSE, true)
-  .set(STREAM_CONFIG, config);
+  .set(STREAM_CONFIG, {
+    // Custom RxJS timeout configuration
+    timeoutConfig: {
+      first: 5_000, // Timeout for the first chunk
+      each: 3_000,  // Timeout between subsequent chunks
+      with: (info) => throwError(() => new Error("Custom timeout exceeded")),
+    },
+    // Custom RxJS retry configuration
+    retryConfig: {
+      count: 4,
+      resetOnSuccess: true,
+    },
+  });
 ```
 
-### Custom delay notifier
+---
 
-`DelayNotifierType` is a factory. It receives delay settings and returns the callback that RxJS invokes for each retry:
+## Debugging
+
+Enable or disable `HSI:` console logs by importing the reactive `debug` signal and setting its value:
 
 ```ts
-type DelayNotifierType = (settings: {
-  delay?: number;
-  maxDelay?: number;
-  jitter?: number;
-}) => (
-  error?: Error,
-  retryCount?: number,
-) => Observable<unknown>;
+import { debug } from "@chey.dev/streamingutils/globals";
+
+// Enable debug logs for troubleshooting during development
+debug.set(true);
+
+// Disable debug logs
+debug.set(false);
 ```
 
-For example, a fixed one-second retry delay is:
+When enabled (default: `false`), logs prefixed with `HSI:` will output request lifecycle events, chunk slicing, backoff timing, and in-band error detection.
 
-```ts
-const fixedDelay: DelayNotifierType = () => () => timer(1000);
+---
+
+## Server Protocol (NDJSON)
+
+The backend stream should send newline-delimited (`\n`) JSON strings with appropriate streaming headers (`Content-Type: application/x-ndjson`).
+
+### Standard Chunk Output
+```text
+{"message":"Processing step 1"}\n
+{"message":"Processing step 2"}\n
+{"done":true}\n
 ```
 
-Returning `timer(...)` schedules another attempt. Returning `throwError(() => error)` stops retrying.
+### In-Band Server Errors
+Because streaming responses commit to an HTTP 200 header before body processing completes, the server can signal a mid-stream failure by writing an error object:
 
-## Non-streaming requests
-
-The interceptor passes ordinary requests through without stream parsing or retries. Do not set `STREAMING_RESPONSE` for normal requests:
-
-```ts
-this.http.get('/api/status').subscribe({
-  next: (status) => console.log(status),
-  error: (error) => console.error(error),
-});
+```json
+{"error":"Upstream database unavailable"}\n
 ```
 
-## Troubleshooting
+The interceptor detects `{ error: string }`, throws an error internally, and triggers your configured retry logic automatically.
 
-### No chunks arrive
+---
 
-Verify `observe: 'events'`, `reportProgress: true`, and `responseType: 'text'`. Also verify that the server writes data progressively instead of building the entire response before calling `res.end()`.
-
-### Chunks are not parsed
-
-Every JSON object must be valid on its own and end with a newline. Do not send a JSON array, pretty-printed JSON, or Server-Sent Events `data:` prefixes.
-
-### The request retries unexpectedly
-
-The interceptor retries when the server sends `{ "error": "..." }`, when the connection fails, or when no chunk arrives before `chunkTimeout`. Check the server logs and the request's `STREAM_CONFIG` values.
-
-### The stream remains open after a component is destroyed
-
-Keep the `Subscription` returned by `subscribe()` and call `unsubscribe()` during component or service teardown. Unsubscribing cancels the client-side request.
-
-## API
+## API Summary
 
 | Export | Module | Description |
-| --- | --- | --- |
-| `HTTPStreamInterceptor` | `HttpStreamInterceptor` | Functional Angular interceptor for parsing, retrying, and timing out marked stream requests. |
-| `STREAMING_RESPONSE` | `globals` | `HttpContextToken<boolean>` that enables stream handling for one request. |
-| `STREAM_CONFIG` | `globals` | `HttpContextToken<StreamConfig>` containing one request's settings and handlers. |
-| `streamSubscription<T>` | `globals` | Creates a typed observer for parsed stream payloads. |
-| `ParsedData` | `globals` | Shape used by the package's built-in parsed-data model. |
-| `StreamEventFunction<T>` | `globals` | Callback type receiving a parsed payload of type `T`. |
-| `StreamConfig` | `globals` | Complete request-specific retry, timeout, and handler configuration. |
-| `DelayNotifierType` | `globals` | Factory type for custom retry delay callbacks. |
+| :--- | :--- | :--- |
+| `HTTPStreamInterceptor` | `HttpStreamInterceptor` | Functional Angular HTTP interceptor for parsing, retrying, and chunk-timing NDJSON requests. |
+| `STREAMING_RESPONSE` | `globals` | `HttpContextToken<boolean>` enabling streaming interceptor mechanics on a request. |
+| `STREAM_CONFIG` | `globals` | `HttpContextToken<Partial<StreamConfig>>` for request-level configuration overrides. |
+| `setDefaultConfig` | `globals` | Sets application-wide default `StreamConfig`. |
+| `getDefaultConfig` | `globals` | Returns a clone of the current default `StreamConfig`. |
+| `streamSubscription<T>` | `globals` | Observer factory delivering parsed stream payloads of type `T` to callbacks. |
+| `debug` | `globals` | `WritableSignal<boolean>` toggle controlling `HSI:` debug logging to the console. |
+| `StreamConfig` | `globals` | Configuration interface for retry, timeout, backoff, and error handling. |
+
+---
 
 ## License
 
