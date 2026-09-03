@@ -3,7 +3,6 @@
  * streamed NDJSON requests, identified via the `STREAMING_RESPONSE` context
  * token set on the request. Retry and timeout settings come from `STREAM_CONFIG`.
  */
-import { throwError } from "rxjs";
 import {
   HttpEventType,
   HttpInterceptorFn,
@@ -28,13 +27,21 @@ import { timeout, retry, map, catchError } from "rxjs/operators";
  * before parsing it.
  */
 export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
-  // Read this request's configuration, including the context token's defaults.
-  const config = {
-    ...DEFAULT_STREAM_CONFIG,
-    ...req.context.get(STREAM_CONFIG),
-  };
-
   if (req.context.get(STREAMING_RESPONSE)) {
+    // Read this request's configuration, including the context token's defaults.
+    const config = {
+      ...DEFAULT_STREAM_CONFIG,
+      ...req.context.get(STREAM_CONFIG),
+    };
+    let retryConfig = config?.retryConfig || {
+      count: config.maxRetryCount,
+      delay: config.delayNotifier(config),
+    };
+    let timeoutConfig = config?.timeoutConfig || {
+      each: config.chunkTimeout,
+      with: config.chunkTimeoutHandler,
+    };
+
     let partialTextLength = 0;
     let buffer: string = "";
 
@@ -42,24 +49,15 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
       // Parse streamed data and surface any in-band server error to retry.
       map((event) => bufferData(event, buffer, partialTextLength)),
       map((event) => config.serverErrorCheck(event)),
-      timeout({
-        each: config.chunkTimeout,
-        // The retry operator sends timeout errors to the configured notifier.
-        with: () => {
-          return throwError(() => new Error("Chunk Request timed out"));
-        },
-      }),
-      retry({
-        count: config.retryCount,
-        delay: config.delayNotifier(config),
-      }),
+      timeout<HttpEvent<any>>(timeoutConfig as any),
+      retry(retryConfig),
       catchError(config.errorHandler),
     );
   }
 
   // Non-streaming requests use the request's error handler without stream retries.
   else {
-    return next(req).pipe(catchError(config.errorHandler));
+    return next(req).pipe(catchError(DEFAULT_STREAM_CONFIG.errorHandler));
   }
 };
 

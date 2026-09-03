@@ -10,19 +10,28 @@ import {
   HttpErrorResponse,
 } from "@angular/common/http";
 
-import { Observable, throwError, timer } from "rxjs";
+import {
+  Observable,
+  RetryConfig,
+  throwError,
+  TimeoutConfig,
+  timer,
+} from "rxjs";
 
 /** Marks a request as a long-lived streamed response so the interceptor applies retry and timeout handling. */
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
 
 /** Supplies default retry, timeout, parsing, and error-handling behavior for each request. */
 export const DEFAULT_STREAM_CONFIG: StreamConfig = {
-  delay: 1000,
-  maxDelay: 300000,
+  delay: 1_000,
+  maxDelay: 5_000,
   jitter: 500,
-  chunkTimeout: 5000,
-  requestTimeout: 30000,
-  retryCount: 3,
+  chunkTimeout: 7_000,
+  maxRetryCount: 3,
+  retryConfig: null,
+  timeoutConfig: null,
+  chunkTimeoutHandler: () =>
+    throwError(() => new Error("Chunk Request timed out")),
   delayNotifier: delayNotifier,
   errorHandler: defaultErrorHandler,
   serverErrorCheck: serverErrorCheck,
@@ -76,10 +85,11 @@ function delayNotifier({
   delay = DEFAULT_STREAM_CONFIG.delay,
   maxDelay = DEFAULT_STREAM_CONFIG.maxDelay,
   jitter = DEFAULT_STREAM_CONFIG.jitter,
-  retryCount = DEFAULT_STREAM_CONFIG.retryCount,
+  maxRetryCount = DEFAULT_STREAM_CONFIG.maxRetryCount,
 }) {
-  return (error?: Error, rc: number = retryCount) => {
-    const currentDelay = rc * delay + Math.floor(Math.random() * jitter);
+  return (error?: Error, retryCount: number = maxRetryCount) => {
+    const currentDelay =
+      retryCount * delay + Math.floor(Math.random() * jitter);
 
     // Stop scheduling retries after the configured delay ceiling is exceeded.
     if (currentDelay > maxDelay) {
@@ -87,7 +97,7 @@ function delayNotifier({
     }
 
     console.warn(
-      `${error?.message}:\nClient Retrying request after ${currentDelay}ms (retry count: ${rc})`,
+      `${error?.message}:\nClient Retrying request after ${currentDelay}ms (retry count: ${retryCount})`,
     );
     return timer(currentDelay);
   };
@@ -120,21 +130,23 @@ export type StreamConfig = {
   maxDelay: number;
   jitter: number;
   chunkTimeout: number;
-  requestTimeout: number;
-  retryCount: number;
+  maxRetryCount: number;
+  retryConfig: RetryConfig | null;
+  timeoutConfig?: number | Date | TimeoutConfig<HttpEvent<any>> | null;
   delayNotifier: DelayNotifierType;
-  errorHandler: (error: Error) => Observable<never>;
-  serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
+  errorHandler: (error: Error) => Observable<Error>;
+  serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<Error>;
+  chunkTimeoutHandler: (error: Error) => Observable<never>;
 };
 
 export type DelayNotifierType = ({
   delay,
   maxDelay,
   jitter,
-  retryCount,
+  maxRetryCount,
 }: {
-  delay?: number;
-  maxDelay?: number;
-  jitter?: number;
-  retryCount?: number;
-}) => (error?: Error, retryCount?: number) => Observable<any>;
+  delay: number;
+  maxDelay: number;
+  jitter: number;
+  maxRetryCount: number;
+}) => (error?: Error, maxRetryCount?: number) => Observable<any>;
