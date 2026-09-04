@@ -85,11 +85,12 @@ export const STREAM_CONFIG = new HttpContextToken<Partial<StreamConfig>>(
 );
 
 /**
- * Builds an Observer for a streamed HTTP request and forwards each parsed
- * payload of type `T` to the caller's callbacks. The generic keeps the
- * callback payload aligned with the application's stream response shape.
+ * Builds a convenience observer for streamed HTTP events.
+ * The helper keeps the original Angular `HttpEvent` available to consumers while
+ * also exposing the buffered NDJSON payload as `event.parsedData` for a typed,
+ * app-friendly callback surface.
  * `errorCB` receives the terminal error and `completeCB` runs when the stream ends.
- * @typeParam T Parsed payload type delivered to `nextCB`.
+ * @typeParam T Parsed payload type used for `event.parsedData`.
  * @param callbacks Optional callbacks for next, error, and complete notifications.
  * @returns Observer object compatible with RxJS subscription methods.
  */
@@ -103,7 +104,7 @@ export const streamSubscription = <T>({
   completeCB?: Function;
 } = {}): any => {
   return {
-    // Forward parsed event data to the next callback.
+    // Forward the full Angular event while also exposing the parsed NDJSON payload.
     next: (event: HttpEvent<T>) => {
       // The interceptor adds parsedData to streamed HTTP events.
       // @ts-ignore
@@ -168,8 +169,9 @@ function delayNotifier({
 }
 
 /**
- * Inspects `DownloadProgress` events for in-band error messages emitted by the backend and throws if found.
- * Why: Server streams return HTTP 200 before errors occur, so failures must be detected from chunk contents and thrown so RxJS retry and error pipelines trigger.
+ * Inspects `DownloadProgress` events for in-band stream errors emitted by the backend.
+ * Why: A streaming response commits HTTP 200 before the body is complete, so the server may
+ * send an error payload inside the body and the interceptor must surface it to RxJS retry logic.
  * @param event Incoming HTTP event to inspect.
  * @returns The original `event` if no in-band error was present.
  * @throws `Error` When an in-band error marker exists on `event.parsedData`.

@@ -4,11 +4,11 @@ Helpers for consuming and parsing newline-delimited JSON (NDJSON) streams with A
 
 ## Features
 
-- **Automated NDJSON Parsing & Buffering:** Handles split chunks and merges parsed JSON objects onto incoming Angular `HttpEvent` objects (`event.parsedData`).
+- **Automated NDJSON Parsing & Buffering:** Handles split chunks and merges parsed JSON objects onto incoming Angular `HttpEvent` objects as `event.parsedData` while preserving the original event stream for advanced consumers.
 - **In-Band Error Detection:** Detects `{ "error": "..." }` server payloads sent during an active stream (where HTTP status is committed to 200) and routes them into RxJS retry pipelines.
 - **Resilient Retry & Timeout Logic:** Configurable linear backoff with random jitter, chunk timeouts, and full compatibility with RxJS `RetryConfig` and `TimeoutConfig`.
 - **Global & Request-Level Config:** Set app-wide defaults at bootstrap or customize behavior per request via `HttpContext`.
-- **Consumer-Friendly Subscription Helper:** `streamSubscription<T>` parses and delivers typed data payloads directly to callbacks.
+- **Consumer-Friendly Subscription Helper:** `streamSubscription<T>` is a convenience wrapper that types `event.parsedData` for HttpEventType == DownloadProgress. The full Angular event stream still flows through unchanged.
 - **Debug Mode:** Optional debug logging prefixed with `HSI:` for easy troubleshooting.
 
 ## Requirements
@@ -108,6 +108,14 @@ export class StreamService {
 ```
 
 `streamSubscription` also supports `completeCB`, which runs when the request observable completes. Use it alongside `nextCB` and `errorCB` when you need to respond to the stream's completion event.
+
+### Raw Angular events are still available
+
+This package does not replace Angular's event stream. It adds buffered NDJSON parsing by attaching `parsedData` to each event while leaving the original `HttpEvent` available to the subscriber.
+
+If you prefer to handle the raw Angular stream yourself, skip `streamSubscription` and subscribe directly to `HttpClient` with `observe: "events"` and `responseType: "text"`.
+
+For more on Angular's native streaming APIs, see the official docs: https://v21.angular.dev/guide/http/making-requests
 
 ---
 
