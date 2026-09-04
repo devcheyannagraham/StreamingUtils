@@ -1,7 +1,7 @@
 {
   "name": "@chey.dev/streamingutils",
   "version": "3.0.0",
-  "description": "the package contains helpers to stream posts requests in an angular ecosystem using httpclient",
+  "description": "Angular HTTP streaming helpers for NDJSON requests, including buffering, retry handling, chunk timeouts, and error handling.",
   "homepage": "https://github.com/devcheyannagraham/StreamingUtils#readme",
   "bugs": {
     "url": "https://github.com/devcheyannagraham/StreamingUtils/issues"

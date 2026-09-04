@@ -186,13 +186,22 @@ this.http
 | `retryConfig` | `RetryConfig \| null` | `null` | Custom RxJS `RetryConfig` object to bypass default backoff calculation. |
 | `timeoutConfig` | `number \| Date \| TimeoutConfig \| null` | `null` | Custom duration, Date, or RxJS `TimeoutConfig` object. |
 | `delayNotifier` | `DelayNotifierType` | *linear backoff* | Factory function producing the retry delay timer Observable. |
-| `errorHandler` | `(error: Error) => Observable<never>` | *rethrow* | Terminal error handler called when retries are exhausted. |
+| `errorHandler` | `(error: any, caught: Observable<any>) => ObservableInput<any>` | *rethrow* | Terminal error handler passed to RxJS `catchError` after retries are exhausted. |
 | `serverErrorCheck` | `(event: HttpEvent<any>) => HttpEvent<any>` | *in-band check* | Checks chunk payload for in-band `{ error: "..." }` markers. |
 | `chunkTimeoutHandler` | `(error: Error) => Observable<never>` | *rethrow* | Fallback error handler triggered when chunk timeout occurs. |
 
 ### Error Handling
 
-`errorHandler` is an optional configuration setting passed directly to RxJS `catchError`. After retries are exhausted, the default handler rethrows the final error so the subscriber receives it through `errorCB`, which `streamSubscription` forwards to the subscriber's error callback. If you need different behavior, supply your own RxJS-compatible handler function through `setDefaultConfig` or `STREAM_CONFIG`.
+`errorHandler` is an optional configuration setting passed directly to RxJS `catchError`. By default it rethrows the final error, which then reaches the subscription via `errorCB` in `streamSubscription`. If you need different behavior, provide your own RxJS-compatible handler function through `setDefaultConfig` or `STREAM_CONFIG`.
+
+A compatible handler follows the RxJS `catchError` contract:
+
+```ts
+const customErrorHandler = (error: any, caught: Observable<any>) => {
+  console.error("Stream failed:", error);
+  return throwError(() => error);
+};
+```
 
 Use `errorCB` for application-specific error handling after the stream has failed:
 

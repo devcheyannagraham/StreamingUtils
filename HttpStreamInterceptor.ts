@@ -52,12 +52,14 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
       maxRetryCount: config.maxRetryCount,
     });
 
-    let partialTextLength = 0;
-    let buffer: string = "";
+    const dataBuffer: dataBuffer = {
+      partialTextLength: 0,
+      buffer: "",
+    };
 
     return next(req).pipe(
       // Parse streamed data and surface any in-band server error to retry.
-      map((event) => bufferData(event, buffer, partialTextLength)),
+      map((event) => bufferData(event, dataBuffer)),
       map((event) => config.serverErrorCheck(event)),
       timeout<HttpEvent<any>>(timeoutConfig as any),
       retry(retryConfig),
@@ -79,38 +81,35 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
  * Buffers streamed `DownloadProgress` chunks until complete newline-delimited JSON messages are formed, then parses and attaches them to `event.parsedData`.
  * Why: Server data packets can arrive in fragments across multiple `DownloadProgress` events; buffering prevents premature JSON parsing errors on split chunks. Also resets buffer state on new request initiation (`HttpEventType.Sent`).
  * @param event Incoming HTTP event to process.
- * @param buffer Accumulated string buffer containing partial or unparsed chunk data.
- * @param partialTextLength Character index offset tracking previously read text from `event.partialText`.
+ * @param dbf Shared state object holding the accumulated buffer text and the last processed `partialText` length for the active stream.
  * @returns The HTTP event enriched with parsed payload data attached to `event.parsedData`.
- * @throws `Error` When an in-band server error property is encountered inside a parsed JSON chunk.
  */
-const bufferData = (
-  event: HttpEvent<any>,
-  buffer: string,
-  partialTextLength: number,
-) => {
+const bufferData = (event: HttpEvent<any>, dbf: dataBuffer) => {
   let stringChunks = [];
   let dataChunk: any;
   if (event.type === HttpEventType.DownloadProgress && event.partialText) {
     // only add new stuff to buffer
-    const newSlice = event.partialText.slice(partialTextLength);
-    buffer += newSlice;
+    const newSlice = event.partialText.slice(dbf.partialTextLength);
+    dbf.buffer += newSlice;
     logDebug("bufferData: Received DownloadProgress chunk slice", {
       newSliceLength: newSlice.length,
       totalPartialTextLength: event.partialText.length,
     });
 
     // Extract complete, newline-delimited JSON messages from the buffer.
-    stringChunks = buffer.split("\n");
+    stringChunks = dbf.buffer.split("\n");
 
     // handle incomplete data
     let lastStringChunk = stringChunks.pop() || "";
     if (lastStringChunk?.trim() == "") {
-      buffer = "";
+      dbf.buffer = "";
     } else {
       // assign remaining data to buffer for next chunk
-      buffer = lastStringChunk;
-      logDebug("bufferData: Incomplete chunk retained in buffer", buffer);
+      dbf.buffer = lastStringChunk;
+      logDebug(
+        "bufferData: Incomplete chunk retained in buffer",
+        dbf.buffer,
+      );
     }
 
     // convert string chunks to JSON objects
@@ -126,30 +125,19 @@ const bufferData = (
         return { ...acc, parseError: "Error parsing JSON chunk", chunk: chunk };
       }
 
-      // detect in-band error marker and throw upstream if found, so retry logic can handle it.
-      // only catch server errors. The server sends `error` as a plain string (see server.ts),
-      // since JSON.stringify on an Error object drops message/stack (they're non-enumerable).
-      if (parsedChunk?.error) {
-        logDebug(
-          "bufferData: In-band server error detected in chunk",
-          parsedChunk.error,
-        );
-        throw new Error(parsedChunk.error || "Unknown server error");
-      } else {
-        return { ...acc, ...parsedChunk };
-      }
+      return { ...acc, ...parsedChunk };
     }, {});
 
     // Track last read position so the next chunk doesn't re-parse the same data.
-    partialTextLength = event.partialText.length;
+    dbf.partialTextLength = event.partialText.length;
     logDebug("bufferData: Successfully processed chunks", {
       dataChunk,
-      bufferRemaining: buffer,
+      bufferRemaining: dbf.buffer,
     });
   } else if (event.type === HttpEventType.Sent) {
     // new request, reset partialTextLength
-    partialTextLength = 0;
-    buffer = "";
+    dbf.partialTextLength = 0;
+    dbf.buffer = "";
     logDebug(
       "bufferData: HttpEventType.Sent event received, reset buffer state",
     );
@@ -157,4 +145,9 @@ const bufferData = (
   // @ts-ignore
   event["parsedData"] = dataChunk;
   return event;
+};
+
+type dataBuffer = {
+  buffer: string;
+  partialTextLength: number;
 };
