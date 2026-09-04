@@ -1,6 +1,6 @@
 {
   "name": "@chey.dev/streamingutils",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "description": "Angular HTTP streaming helpers for NDJSON requests, including buffering, retry handling, chunk timeouts, and error handling.",
   "homepage": "https://github.com/devcheyannagraham/StreamingUtils#readme",
   "bugs": {
