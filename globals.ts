@@ -9,7 +9,7 @@ import {
   HttpEventType,
   HttpErrorResponse,
 } from "@angular/common/http";
-import { signal, WritableSignal } from "@angular/core";
+import { signal } from "@angular/core";
 
 import {
   Observable,
@@ -17,13 +17,16 @@ import {
   throwError,
   TimeoutConfig,
   timer,
+  catchError,
+  ObservableInput,
 } from "rxjs";
 
-/**
- * Reactive Angular signal to enable or disable debug logging across the streaming utilities.
- * Defaults to `false`.
- */
-export const debug: WritableSignal<boolean> = signal(false);
+/** Toggle flag to enable or disable debug logging across the streaming utilities. Defaults to false. */
+const debug = signal(false);
+
+export const setDebug = (value: boolean) => {
+  debug.set(value);
+}
 
 /**
  * Conditionally logs debug messages prefixed with `HSI:` when debug mode is enabled.
@@ -209,7 +212,7 @@ export type StreamConfig = {
   retryConfig?: RetryConfig | null;
   timeoutConfig?: number | Date | TimeoutConfig<HttpEvent<any>> | null;
   delayNotifier: DelayNotifierType;
-  errorHandler: (error: Error) => Observable<never>;
+  errorHandler: (error:any, caught:Observable<any>) => ObservableInput<any>;
   serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
   chunkTimeoutHandler: (error: Error) => Observable<never>;
 };

@@ -107,6 +107,8 @@ export class StreamService {
 }
 ```
 
+`streamSubscription` also supports `completeCB`, which runs when the request observable completes. Use it alongside `nextCB` and `errorCB` when you need to respond to the stream's completion event.
+
 ---
 
 ## Configuration
@@ -175,7 +177,7 @@ this.http
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `maxRetryCount` | `number` | `3` | Maximum number of retry attempts before giving up. |
+| `maxRetryCount` | `number` | `3` | Maximum number of retry attempts before giving up. Setting to `0` disables retries completely. |
 | `delay` | `number` | `1000` | Base delay between retries in milliseconds. |
 | `maxDelay` | `number` | `5000` | Maximum calculated retry delay ceiling in milliseconds. |
 | `jitter` | `number` | `500` | Maximum random jitter in milliseconds added to retry delay. |
@@ -188,9 +190,33 @@ this.http
 | `serverErrorCheck` | `(event: HttpEvent<any>) => HttpEvent<any>` | *in-band check* | Checks chunk payload for in-band `{ error: "..." }` markers. |
 | `chunkTimeoutHandler` | `(error: Error) => Observable<never>` | *rethrow* | Fallback error handler triggered when chunk timeout occurs. |
 
+### Error Handling
+
+`errorHandler` is an optional configuration setting passed directly to RxJS `catchError`. After retries are exhausted, the default handler rethrows the final error so the subscriber receives it through `errorCB`, which `streamSubscription` forwards to the subscriber's error callback. If you need different behavior, supply your own RxJS-compatible handler function through `setDefaultConfig` or `STREAM_CONFIG`.
+
+Use `errorCB` for application-specific error handling after the stream has failed:
+
+```ts
+import { HttpErrorResponse } from "@angular/common/http";
+import { streamSubscription } from "@chey.dev/streamingutils/globals";
+
+streamSubscription({
+  errorCB: (error) => {
+    const message = error instanceof HttpErrorResponse
+      ? `Request failed with status ${error.status}`
+      : error?.message ?? "The stream failed";
+
+    console.error(message, error);
+    // Update application state, show a notification, or start a fallback flow.
+  },
+});
+```
+
 ### Customizing Retry & Timeout Values (Without Writing Custom Objects)
 
 If you only want to change timing values (retry count, delay duration, chunk timeouts) without writing custom RxJS retry objects or functions, simply pass the individual properties:
+
+> **Tip:** To disable retries entirely on a streaming request, set `maxRetryCount: 0`.
 
 #### Per-Request:
 ```ts
@@ -307,6 +333,128 @@ You can pass your custom notifier globally via `setDefaultConfig({ delayNotifier
 
 ---
 
+### Custom In-Band Error Checking (`serverErrorCheck`)
+
+In-band errors are failures that occur mid-stream after the HTTP response status has already been committed to `200 OK`. Because status code headers cannot change once streaming begins, the server delivers the failure message as part of the body data chunk.
+
+#### Default Behavior
+By default, `serverErrorCheck` inspects each `DownloadProgress` event's `event.parsedData` for an `error` property (i.e. `{ error: string }`). If present, it throws a JavaScript `Error(error)` inside the RxJS pipeline, which automatically triggers your retry logic. If no error property exists, it passes the `HttpEvent` through unmodified.
+
+#### Customizing `serverErrorCheck`
+You can customize `serverErrorCheck` if your backend uses a different JSON structure, nested failure codes, status flags, or custom error envelopes.
+
+> **Important:** Even if you change the parsing condition or property names your custom function checks for, these errors are still **in-band errors** occurring inside an established HTTP 200 stream. When your function throws an error, it is caught by the RxJS retry mechanism and handled identically to default in-band errors.
+
+#### Signature
+```ts
+serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
+```
+
+#### Example 1: Custom Property Name or Status Flag
+If your API returns `{ status: "failed", failureReason: "..." }` instead of `{ error: "..." }`:
+
+```ts
+import { HttpEvent, HttpEventType } from "@angular/common/http";
+
+const customErrorCheck = (event: HttpEvent<any>): HttpEvent<any> => {
+  if (event.type === HttpEventType.DownloadProgress) {
+    const data = (event as any)?.parsedData;
+    if (data?.status === "failed") {
+      throw new Error(data.failureReason || "Streaming operation failed");
+    }
+  }
+  return event;
+};
+```
+
+#### Example 2: Nested Error Object with Error Codes
+If your API wraps error details in an object like `{ error: { code: "DB_DISCONNECTED", message: "..." } }`:
+
+```ts
+import { HttpEvent, HttpEventType } from "@angular/common/http";
+
+const nestedErrorCheck = (event: HttpEvent<any>): HttpEvent<any> => {
+  if (event.type === HttpEventType.DownloadProgress) {
+    const errorDetails = (event as any)?.parsedData?.error;
+    if (errorDetails) {
+      const message = typeof errorDetails === "string" 
+        ? errorDetails 
+        : `[${errorDetails.code}] ${errorDetails.message}`;
+      throw new Error(message);
+    }
+  }
+  return event;
+};
+```
+
+You can supply your custom checker globally via `setDefaultConfig({ serverErrorCheck: customErrorCheck })` or per-request via `STREAM_CONFIG`.
+
+---
+
+### Custom Chunk Timeout Handling (`chunkTimeoutHandler`)
+
+When a streaming request is active, `chunkTimeout` governs the maximum allowable wait time (in milliseconds) between consecutive data chunks. If no new chunk arrives within that period, the timeout triggers.
+
+`chunkTimeoutHandler` corresponds directly to the fallback function that is passed to RxJS's `timeout({ with: ... })`. It provides a convenient way to customize just the timeout error behavior without needing to construct an entire RxJS `timeoutConfig` object manually.
+
+#### Default Behavior
+By default, when a chunk timeout occurs, `chunkTimeoutHandler` creates a new error via:
+```ts
+() => throwError(() => new Error("Chunk Request timed out"))
+```
+This error enters the RxJS pipeline, alerting the retry mechanism (`delayNotifier`) that a chunk timed out and initiating a retry attempt up to `maxRetryCount`.
+
+#### Customizing `chunkTimeoutHandler`
+You can provide a custom `chunkTimeoutHandler` if you want to customize how the timeout error is generated or logged, without having to write a full `timeoutConfig` object.
+
+#### Signature
+```ts
+chunkTimeoutHandler: (error: Error) => Observable<never>;
+```
+
+#### Example 1: Custom Error Message and Diagnostics
+```ts
+import { throwError, type Observable } from "rxjs";
+
+const customTimeoutHandler = (error: Error): Observable<never> => {
+  console.warn("Chunk timeout encountered:", error.message);
+  return throwError(() => new Error("Data stream stalled: No response chunk received in time"));
+};
+```
+
+#### Example 2: Setting `chunkTimeoutHandler` in Configuration
+You can configure it globally or per-request:
+
+```ts
+import { HttpClient, HttpContext } from "@angular/common/http";
+import {
+  STREAMING_RESPONSE,
+  STREAM_CONFIG,
+  setDefaultConfig,
+} from "@chey.dev/streamingutils/globals";
+
+// Globally:
+setDefaultConfig({
+  chunkTimeout: 10_000,
+  chunkTimeoutHandler: (err) => throwError(() => new Error(`Stream stalled: ${err.message}`)),
+});
+
+// Or Per-Request:
+this.http.post("/api/stream", {}, {
+  context: new HttpContext()
+    .set(STREAMING_RESPONSE, true)
+    .set(STREAM_CONFIG, {
+      chunkTimeout: 5_000,
+      chunkTimeoutHandler: customTimeoutHandler,
+    }),
+  reportProgress: true,
+  observe: "events",
+  responseType: "text",
+});
+```
+
+---
+
 ### Advanced RxJS Customization
 
 You can supply full RxJS `retryConfig` or `timeoutConfig` objects directly:
@@ -340,16 +488,16 @@ const context = new HttpContext()
 
 ## Debugging
 
-Enable or disable `HSI:` console logs by importing the reactive `debug` signal and setting its value:
+Enable or disable `HSI:` console logs by importing `setDebug`:
 
 ```ts
-import { debug } from "@chey.dev/streamingutils/globals";
+import { setDebug } from "@chey.dev/streamingutils/globals";
 
 // Enable debug logs for troubleshooting during development
-debug.set(true);
+setDebug(true);
 
 // Disable debug logs
-debug.set(false);
+setDebug(false);
 ```
 
 When enabled (default: `false`), logs prefixed with `HSI:` will output request lifecycle events, chunk slicing, backoff timing, and in-band error detection.
@@ -388,7 +536,7 @@ The interceptor detects `{ error: string }`, throws an error internally, and tri
 | `setDefaultConfig` | `globals` | Sets application-wide default `StreamConfig`. |
 | `getDefaultConfig` | `globals` | Returns a clone of the current default `StreamConfig`. |
 | `streamSubscription<T>` | `globals` | Observer factory delivering parsed stream payloads of type `T` to callbacks. |
-| `debug` | `globals` | `WritableSignal<boolean>` toggle controlling `HSI:` debug logging to the console. |
+| `setDebug` | `globals` | Enables or disables `HSI:` debug logging. |
 | `StreamConfig` | `globals` | Configuration interface for retry, timeout, backoff, and error handling. |
 | `DelayNotifierType` | `globals` | Higher-order factory function type for generating custom RxJS retry delay notifiers. |
 
