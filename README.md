@@ -107,7 +107,7 @@ export class StreamService {
 }
 ```
 
-`streamSubscription` also supports `completeCB`, which runs when the request observable completes. Use it alongside `nextCB` and `errorCB` when you need to respond to the stream's completion event.
+`streamSubscription` also supports `completeCB`, which runs when the request observable completes. Use it alongside `nextCB` and `errorCB` when you need to respond to the stream's events.
 
 ### Raw Angular events are still available
 
