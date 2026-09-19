@@ -26,7 +26,7 @@ const debug = signal(false);
 
 export const setDebug = (value: boolean) => {
   debug.set(value);
-}
+};
 
 /**
  * Conditionally logs debug messages prefixed with `HSI:` when debug mode is enabled.
@@ -168,6 +168,20 @@ function delayNotifier({
   };
 }
 
+function retryableError(status: number | undefined = undefined) {
+  // Default retryable HTTP status codes:
+  // 408 Request Timeout, 429 Too Many Requests, 500 Internal Server Error,
+  // 502 Bad Gateway, 503 Service Unavailable, and 504 Gateway Timeout.
+  const RETRYABLE_CODES = [408, 429, 500, 502, 503, 504];
+
+  // If error is in band w/o a status e.g. {error: "custom-server error"}
+  if (!status) return true;
+
+  if (RETRYABLE_CODES.includes(status)) return true;
+  // error contains non retryable server status code
+  else return false;
+}
+
 /**
  * Inspects `DownloadProgress` events for in-band stream errors emitted by the backend.
  * Why: A streaming response commits HTTP 200 before the body is complete, so the server may
@@ -176,13 +190,15 @@ function delayNotifier({
  * @returns The original `event` if no in-band error was present.
  * @throws `Error` When an in-band error marker exists on `event.parsedData`.
  */
-function serverErrorCheck(event: HttpEvent<any>) {
+function serverErrorCheck(event: ExtendedHttpEvent<any>) {
   if (event.type === HttpEventType.DownloadProgress) {
-    // @ts-ignore
-    const error = event?.parsedData?.error;
-    if (error) {
-      logDebug("serverErrorCheck: In-band server error detected", error);
-      throw new Error(error || "Unknown server error");
+    const error: ExtendedError = event.parsedData.error ? event.parsedData : {};
+
+    if (error.error) {
+      if (retryableError(error?.status)) {
+        logDebug("serverErrorCheck: In-band server error detected", error);
+        throw new Error(error.error || "Unknown server error");
+      } else logDebug("Non Retryable Error Code:", error.status);
     }
   }
   return event;
@@ -214,7 +230,7 @@ export type StreamConfig = {
   retryConfig?: RetryConfig | null;
   timeoutConfig?: number | Date | TimeoutConfig<HttpEvent<any>> | null;
   delayNotifier: DelayNotifierType;
-  errorHandler: (error:any, caught:Observable<any>) => ObservableInput<any>;
+  errorHandler: (error: any, caught: Observable<any>) => ObservableInput<any>;
   serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
   chunkTimeoutHandler: (error: Error) => Observable<never>;
 };
@@ -230,3 +246,13 @@ export type DelayNotifierType = ({
   jitter: number;
   maxRetryCount: number;
 }) => (error?: Error, retryCount?: number) => Observable<any>;
+
+type ExtendedError = Error & {
+  error: string;
+  status?: number;
+  message?: any;
+};
+
+type ExtendedHttpEvent<T> = HttpEvent<T> & {
+  parsedData?: T;
+};
