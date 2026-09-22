@@ -172,7 +172,8 @@ function delayNotifier({
   maxRetryCount = defaultStreamConfig.maxRetryCount,
   retryableErrorStatusCode = defaultStreamConfig.retryableErrorStatusCode,
 }) {
-  return (error: ExtendedError, retryCount: number = maxRetryCount) => {
+  return (error: SimpleError, retryCount: number = maxRetryCount) => {
+    // @ts-ignore
     // Apply the configured status-code retry policy before calculating backoff.
     if (!retryableErrorStatusCode.includes(error?.status)) {
       logDebug(
@@ -207,13 +208,13 @@ function delayNotifier({
  * @throws `HttpErrorResponse` when the in-band error includes a status; otherwise throws the original error object.
  */
 
-function serverErrorCheck(event: ExtendedHttpEvent<any>) {
+function serverErrorCheck(event: ExtendedHttpEvent) {
   if (event.type === HttpEventType.DownloadProgress) {
     const error = event.parsedData?.error ? event.parsedData : false;
 
     if (error) {
       logDebug("serverErrorCheck detected error:", error);
-      throw error;
+      throw new HttpErrorResponse(error);
     }
   }
   return event;
@@ -250,7 +251,7 @@ export type StreamConfig = {
   timeoutConfig?: number | Date | TimeoutConfig<HttpEvent<any>> | null;
   delayNotifier: DelayNotifierType;
   errorHandler: (error: any, caught: Observable<any>) => ObservableInput<any>;
-  serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
+  serverErrorCheck: (event: ExtendedHttpEvent) => HttpEvent<any>;
   chunkTimeoutHandler: (error: Error) => Observable<never>;
   retryableErrorStatusCode: any[];
 };
@@ -268,17 +269,13 @@ export type DelayNotifierType = ({
   jitter: number;
   maxRetryCount: number;
   retryableErrorStatusCode: any[];
-}) => (error: ExtendedError, retryCount?: number) => Observable<any>;
+}) => (error: SimpleError, retryCount?: number) => Observable<any>;
 
-type ExtendedHttpEvent<T> = HttpEvent<T> & {
-  parsedData?: T;
+export type ExtendedHttpEvent = HttpEvent<any> & {
+  parsedData?: any;
 };
 
-type ExtendedError =
-  | HttpErrorResponse
-  | {
-      name: string;
-      message: string;
-      stack?: string;
-      status: any;
-    };
+export type SimpleError = {
+  message: string;
+  status?: any;
+}
