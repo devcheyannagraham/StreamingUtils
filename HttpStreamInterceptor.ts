@@ -24,39 +24,40 @@ import { timeout, retry, map, catchError } from "rxjs/operators";
  * @returns Observable stream of HTTP events with parsed JSON data chunks and retry/timeout mechanics applied.
  */
 export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
+  logDebug(
+    "HTTPStreamInterceptor: Intercepting streaming request",
+    req.urlWithParams,
+  );
+  // Merge request-scoped overrides over the library defaults.
+  const config = {
+    ...getDefaultConfig(),
+    ...req.context.get(STREAM_CONFIG),
+  };
+  // Use custom retry settings when provided; otherwise build them from the active configuration.
+  let retryConfig = config?.retryConfig || {
+    count: config.maxRetryCount,
+    delay: config.delayNotifier(config),
+    resetOnSuccess: config?.resetOnSuccess,
+  };
+  // Use custom timeout settings when provided; otherwise use the chunk timeout configuration.
+  let timeoutConfig = config?.timeoutConfig || {
+    each: config.chunkTimeout,
+    with: config.chunkTimeoutHandler,
+  };
+
+  logDebug("HTTPStreamInterceptor: Active streaming configuration", {
+    retryConfig,
+    timeoutConfig,
+    maxRetryCount: config.maxRetryCount,
+  });
+
+  const dataBuffer: dataBuffer = {
+    partialTextLength: 0,
+    buffer: "",
+  };
+
+
   if (req.context.get(STREAMING_RESPONSE)) {
-    logDebug(
-      "HTTPStreamInterceptor: Intercepting streaming request",
-      req.urlWithParams,
-    );
-    // Merge request-scoped overrides over the library defaults.
-    const config = {
-      ...getDefaultConfig(),
-      ...req.context.get(STREAM_CONFIG),
-    };
-    // Use custom retry settings when provided; otherwise build them from the active configuration.
-    let retryConfig = config?.retryConfig || {
-      count: config.maxRetryCount,
-      delay: config.delayNotifier(config),
-      resetOnSuccess: config?.resetOnSuccess,
-    };
-    // Use custom timeout settings when provided; otherwise use the chunk timeout configuration.
-    let timeoutConfig = config?.timeoutConfig || {
-      each: config.chunkTimeout,
-      with: config.chunkTimeoutHandler,
-    };
-
-    logDebug("HTTPStreamInterceptor: Active streaming configuration", {
-      retryConfig,
-      timeoutConfig,
-      maxRetryCount: config.maxRetryCount,
-    });
-
-    const dataBuffer: dataBuffer = {
-      partialTextLength: 0,
-      buffer: "",
-    };
-
     return next(req).pipe(
       // Buffer streamed data, surface in-band errors, then apply timeout and retry handling.
       map((event) => bufferData(event, dataBuffer)),
@@ -73,7 +74,10 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
       "HTTPStreamInterceptor: Passing through non-streaming request",
       req.urlWithParams,
     );
-    return next(req);
+    return next(req).pipe(
+      retry(retryConfig),
+      catchError(config.errorHandler)
+    );
   }
 };
 
@@ -106,10 +110,7 @@ const bufferData = (event: HttpEvent<any>, dbf: dataBuffer) => {
     } else {
       // assign remaining data to buffer for next chunk
       dbf.buffer = lastStringChunk;
-      logDebug(
-        "bufferData: Incomplete chunk retained in buffer",
-        dbf.buffer,
-      );
+      logDebug("bufferData: Incomplete chunk retained in buffer", dbf.buffer);
     }
 
     // Merge each complete JSON line into the parsed payload for this event.
