@@ -42,7 +42,7 @@ export const logDebug = (...args: any[]): void => {
 export const STREAMING_RESPONSE = new HttpContextToken<boolean>(() => false);
 
 /**
- * Module-level default HTTP status codes treated as retryable by `retryableError`:
+ * Module-level default HTTP status codes treated as retryable by `delayNotifier`:
  * 408 Request Timeout, 429 Too Many Requests, 500 Internal Server Error,
  * 502 Bad Gateway, 503 Service Unavailable, and 504 Gateway Timeout.
  */
@@ -132,9 +132,8 @@ export const streamSubscription = <T>({
 } = {}): any => {
   return {
     // Forward the full Angular event while also exposing the parsed NDJSON payload.
-    next: (event: HttpEvent<T>) => {
+    next: (event: ExtendedHttpEvent) => {
       // The interceptor adds parsedData to streamed HTTP events.
-      // @ts-ignore
       const parsedData = event?.parsedData || {};
       logDebug("streamSubscription: next event received", {
         event,
@@ -173,13 +172,12 @@ function delayNotifier({
   retryableErrorStatusCode = defaultStreamConfig.retryableErrorStatusCode,
 }) {
   return (error: SimpleError, retryCount: number = maxRetryCount) => {
-    // @ts-ignore
     // Apply the configured status-code retry policy before calculating backoff.
     if (!retryableErrorStatusCode.includes(error?.status)) {
       logDebug(
         "delayNotifier: Non-Retryable Error:",
         error.status,
-        error.message,
+        error?.message,
       );
       return throwError(() => new Error(error.message));
     }
@@ -205,7 +203,7 @@ function delayNotifier({
  * Why: Once a streaming response commits HTTP 200, backend failures must be converted into RxJS errors from the body.
  * @param event Incoming HTTP event to inspect.
  * @returns The original event when no in-band error is present.
- * @throws `HttpErrorResponse` when the in-band error includes a status; otherwise throws the original error object.
+ * @throws `HttpErrorResponse` constructed from the in-band error payload found in `event.parsedData`.
  */
 
 function serverErrorCheck(event: ExtendedHttpEvent) {
@@ -276,6 +274,6 @@ export type ExtendedHttpEvent = HttpEvent<any> & {
 };
 
 export type SimpleError = {
-  message: string;
+  message?: string;
   status?: any;
 }

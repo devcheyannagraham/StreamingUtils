@@ -1,7 +1,7 @@
 /**
- * Functional HTTP interceptor that adds retry-on-failure, chunk timeout,
- * and JSON buffering handling for streamed NDJSON requests identified via
- * the `STREAMING_RESPONSE` HttpContext token.
+ * Functional HTTP interceptor that applies retry-on-failure and error handling to every
+ * intercepted request, plus chunk timeout and NDJSON buffering for streamed requests
+ * identified via the `STREAMING_RESPONSE` HttpContext token.
  */
 import {
   HttpEventType,
@@ -17,11 +17,12 @@ import {
 import { timeout, retry, map, catchError } from "rxjs/operators";
 
 /**
- * Intercepts HTTP requests and manages retry, timeout, buffering, and error handling for streamed NDJSON endpoints.
+ * Intercepts HTTP requests and applies retry and error handling to all of them; requests marked with
+ * `STREAMING_RESPONSE` additionally get chunk buffering and chunk-timeout handling for streamed NDJSON endpoints.
  * Why: Stream responses commit HTTP status 200 early in the header phase, requiring in-band error detection and stream chunk buffering over partial text deliveries.
  * @param req Angular HTTP request object to inspect and handle.
  * @param next Next interceptor or HTTP backend handler in the pipeline.
- * @returns Observable stream of HTTP events with parsed JSON data chunks and retry/timeout mechanics applied.
+ * @returns Observable stream of HTTP events with retry/error handling applied, plus parsed JSON data chunks and timeout mechanics for streaming requests.
  */
 export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
   logDebug(
