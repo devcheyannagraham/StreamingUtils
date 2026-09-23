@@ -357,7 +357,7 @@ export type DelayNotifierType = ({
 
 #### Default Delay Notifier
 
-The default delay notifier uses `DEFAULT_RETRYABLE_ERROR_STATUS_CODES[0, 408, 429, 500, 502, 503, 504]` to determine which errors are retried. By default only error codes in the status codes array are retried.
+The default delay notifier uses `DEFAULT_RETRYABLE_ERROR_STATUS_CODES` (`[0, 408, 429, 500, 502, 503, 504]`) to determine which errors are retried. By default only error codes in the status codes array are retried.
 
 ##### Streamed Error:
 
@@ -468,7 +468,9 @@ serverErrorCheck: (event: HttpEvent<any>) => HttpEvent<any>;
 
 #### Expected thrown error shape
 
-`delayNotifier` is typed around `Partial<HttpErrorResponse>`, so the expected thrown error type is `HttpErrorResponse` or an object with the same key fields used by retry logic (`status`, `message`).
+`delayNotifier` is typed around `Partial<HttpErrorResponse>`, so the expected thrown error type is `HttpErrorResponse` or an object with the same key fields used by retry logic (`status`, plus readable text in `error`).
+
+`message` may still exist on thrown errors, but the preferred location for custom human-readable details is the `error` field.
 
 If `serverErrorCheck` throws a plain object instead of an error instance, retries can still work when `status` is present, but you lose normal error semantics (for example stack traces and `instanceof` checks).
 
@@ -544,7 +546,6 @@ const nestedErrorCheck = (event: HttpEvent<any>): HttpEvent<any> => {
       throw new HttpErrorResponse({
         error: message,
         status: errorDetails.code,
-        message,
       });
     }
   }
@@ -617,7 +618,7 @@ By default, when a chunk timeout occurs, `chunkTimeoutHandler` creates an `HttpE
     () =>
       new HttpErrorResponse({
         status: 408,
-        message: "Chunk Request timed out",
+        error: "Chunk Request timed out",
       }),
   );
 ```
@@ -647,7 +648,7 @@ const customTimeoutHandler = (info): Observable<never> => {
     () =>
       new HttpErrorResponse({
         status: 408,
-        message: "Data stream stalled: No response chunk received in time",
+        error: "Data stream stalled: No response chunk received in time",
       }),
   );
 };
@@ -673,7 +674,7 @@ setDefaultConfig({
       () =>
         new HttpErrorResponse({
           status: 408,
-          message: "Stream stalled",
+          error: "Stream stalled",
         }),
     ),
 });
