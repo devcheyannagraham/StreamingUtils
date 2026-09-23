@@ -135,7 +135,7 @@ export const streamSubscription = <T>({
   completeCB,
 }: {
   nextCB?: StreamEventFunction<T>;
-  errorCB?: (error?: HttpErrorResponse) => any | void;
+  errorCB?: (error?: Partial<HttpErrorResponse>) => any | void;
   completeCB?: Function;
 } = {}): any => {
   return {
@@ -149,7 +149,7 @@ export const streamSubscription = <T>({
       });
       if (nextCB) nextCB(parsedData, event);
     },
-    error: (error?: HttpErrorResponse) => {
+    error: (error?: Partial<HttpErrorResponse>) => {
       logDebug("streamSubscription: error received", error);
       errorCB?.(error);
     },
@@ -173,7 +173,7 @@ function delayNotifier({
   maxRetryCount = defaultStreamConfig.maxRetryCount,
   retryableErrorStatusCode = defaultStreamConfig.retryableErrorStatusCode,
 }) {
-  return (error: HttpErrorResponse, retryCount: number = maxRetryCount) => {
+  return (error: Partial<HttpErrorResponse>, retryCount: number = maxRetryCount) => {
     // Stop scheduling retries after max retries reached.
     if (retryCount > maxRetryCount) {
       logDebug("delayNotifier: Maximum retries reached, terminating retries");
@@ -184,8 +184,8 @@ function delayNotifier({
     if (!retryableErrorStatusCode.includes(error?.status)) {
       logDebug(
         "delayNotifier: Non-Retryable Error:",
-        error.status,
-        error.message,
+        error?.status,
+        error?.message,
       );
       return throwError(() => (error));
     }
@@ -197,7 +197,7 @@ function delayNotifier({
     );
 
     logDebug(
-      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${error.message}`,
+      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${error?.message}`,
     );
     return timer(currentDelay);
   };
@@ -229,7 +229,7 @@ function serverErrorCheck(event: ExtendedHttpEvent) {
  * @param error Error thrown during request processing or retry exhaustion.
  * @returns Observable that immediately errors with the provided error.
  */
-function defaultErrorHandler(error: HttpErrorResponse): Observable<never> {
+function defaultErrorHandler(error: Partial<HttpErrorResponse>): Observable<never> {
   logDebug("defaultErrorHandler: Handling terminal error", error);
   return throwError(() => error);
 }
@@ -274,7 +274,7 @@ export type DelayNotifierType = ({
   jitter: number;
   maxRetryCount: number;
   retryableErrorStatusCode: any[];
-}) => (error: HttpErrorResponse, retryCount?: number) => Observable<any>;
+}) => (error: Partial<HttpErrorResponse>, retryCount?: number) => Observable<any>;
 
 export type ExtendedHttpEvent = HttpEvent<any> & {
   parsedData?: any;
