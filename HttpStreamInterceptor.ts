@@ -46,6 +46,39 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
     with: config.chunkTimeoutHandler,
   };
 
+  // Build the timeout operator via explicit narrowing so TypeScript can resolve RxJS overloads.
+  const timeoutOperator = (() => {
+    // Keep number/date checks separate; combining them breaks overload narrowing for `timeout`.
+    if (typeof timeoutConfig === "number") {
+      // Timeout after N ms between emissions (and first emission when `first` is not provided).
+      return timeout<HttpEvent<any>>(timeoutConfig);
+    }
+
+    if (timeoutConfig instanceof Date) {
+      // Timeout at an absolute wall-clock time.
+      return timeout<HttpEvent<any>>(timeoutConfig);
+    }
+
+    if (timeoutConfig.with) {
+      // `with` switches to a fallback observable instead of emitting TimeoutError.
+      return timeout({
+        first: timeoutConfig.first,
+        each: timeoutConfig.each,
+        with: timeoutConfig.with,
+        scheduler: timeoutConfig.scheduler,
+        meta: timeoutConfig.meta,
+      });
+    }
+
+    // Without `with`, timeout emits RxJS TimeoutError on expiry.
+    return timeout<HttpEvent<any>>({
+      first: timeoutConfig.first,
+      each: timeoutConfig.each,
+      scheduler: timeoutConfig.scheduler,
+      meta: timeoutConfig.meta,
+    });
+  })();
+
   logDebug("HTTPStreamInterceptor: Active streaming configuration", {
     retryConfig,
     timeoutConfig,
@@ -63,7 +96,7 @@ export const HTTPStreamInterceptor: HttpInterceptorFn = (req, next) => {
       // Buffer streamed data, surface in-band errors, then apply timeout and retry handling.
       map((event) => bufferData(event, dataBuffer)),
       map((event) => config.serverErrorCheck(event)),
-      timeout<HttpEvent<any>>(timeoutConfig as any),
+      timeoutOperator,
       retry(retryConfig),
       catchError(config.errorHandler),
     );

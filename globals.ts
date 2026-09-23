@@ -13,6 +13,7 @@ import { signal } from "@angular/core";
 import {
   Observable,
   RetryConfig,
+  TimeoutInfo,
   throwError,
   TimeoutConfig,
   timer,
@@ -68,7 +69,7 @@ export const getDefaultRetryableErrorCodes = () => {
   return [...DEFAULT_RETRYABLE_ERROR_STATUS_CODES];
 };
 
-/** Holds the module-level retry, timeout, buffering, and error-handling defaults for streaming requests. */
+/** Holds module-level interceptor defaults; chunk buffering/timeout options apply only to streamed requests. */
 let defaultStreamConfig: StreamConfig = {
   delay: 1_000,
   maxDelay: 5_000,
@@ -77,8 +78,15 @@ let defaultStreamConfig: StreamConfig = {
   maxRetryCount: 3,
   retryConfig: null,
   timeoutConfig: null,
-  chunkTimeoutHandler: () =>
-    throwError(() => new Error("Chunk Request timed out")),
+  // Emit an HTTP-shaped timeout error so retry policy can evaluate `status` consistently.
+  chunkTimeoutHandler: (_info) =>
+    throwError(
+      () =>
+        new HttpErrorResponse({
+          statusText: "Chunk Request timed out",
+          status: 408,
+        }),
+    ),
   delayNotifier: delayNotifier,
   errorHandler: defaultErrorHandler,
   serverErrorCheck: serverErrorCheck,
@@ -116,7 +124,7 @@ export const STREAM_CONFIG = new HttpContextToken<Partial<StreamConfig>>(
  * The helper keeps the original Angular `HttpEvent` available to consumers while
  * also exposing the buffered NDJSON payload as `event.parsedData` for a typed,
  * app-friendly callback surface.
- * `errorCB` receives terminal errors after retry handling, and `completeCB` runs when the stream ends.
+ * `errorCB` receives terminal `HttpErrorResponse` values after retry handling, and `completeCB` runs when the stream ends.
  * @typeParam T Parsed payload type used for `event.parsedData`.
  * @param callbacks Optional callbacks for next, error, and complete notifications.
  * @returns Observer object compatible with RxJS subscription methods.
@@ -127,7 +135,7 @@ export const streamSubscription = <T>({
   completeCB,
 }: {
   nextCB?: StreamEventFunction<T>;
-  errorCB?: (error?: Error | HttpErrorResponse) => any | void;
+  errorCB?: (error?: HttpErrorResponse) => any | void;
   completeCB?: Function;
 } = {}): any => {
   return {
@@ -141,14 +149,8 @@ export const streamSubscription = <T>({
       });
       if (nextCB) nextCB(parsedData, event);
     },
-    error: (error?: Error | HttpErrorResponse) => {
+    error: (error?: HttpErrorResponse) => {
       logDebug("streamSubscription: error received", error);
-      if (error instanceof HttpErrorResponse && error.status === 0) {
-        logDebug("streamSubscription: Request failed without an HTTP status");
-        errorCB?.(new Error("Request failed: " + error.message));
-        return;
-      }
-
       errorCB?.(error);
     },
     complete: () => {
@@ -162,7 +164,7 @@ export const streamSubscription = <T>({
  * Creates the retry delay callback used by RxJS `retry`, applying linear backoff with jitter.
  * Why: Centralizes retry eligibility and timing for transport, timeout, and in-band errors.
  * @param config Delay, retry-limit, and retryable-status configuration.
- * @returns A callback that throws immediately for non-retryable errors or excessive delay; otherwise returns a timer Observable.
+ * @returns A callback that throws immediately once `retryCount` exceeds `maxRetryCount` or for non-retryable errors; otherwise returns a timer Observable with the calculated delay capped at `maxDelay`.
  */
 function delayNotifier({
   delay = defaultStreamConfig.delay,
@@ -171,28 +173,31 @@ function delayNotifier({
   maxRetryCount = defaultStreamConfig.maxRetryCount,
   retryableErrorStatusCode = defaultStreamConfig.retryableErrorStatusCode,
 }) {
-  return (error: SimpleError, retryCount: number = maxRetryCount) => {
+  return (error: HttpErrorResponse, retryCount: number = maxRetryCount) => {
+    // Stop scheduling retries after max retries reached.
+    if (retryCount > maxRetryCount) {
+      logDebug("delayNotifier: Maximum retries reached, terminating retries");
+      return throwError(() => error);
+    }
+
     // Apply the configured status-code retry policy before calculating backoff.
     if (!retryableErrorStatusCode.includes(error?.status)) {
       logDebug(
         "delayNotifier: Non-Retryable Error:",
         error.status,
-        error?.message,
+        error.message,
       );
-      return throwError(() => new Error(error.message));
+      return throwError(() => (error));
     }
 
-    const currentDelay =
-      retryCount * delay + Math.floor(Math.random() * jitter);
-
-    // Stop scheduling retries after the configured delay ceiling is exceeded.
-    if (currentDelay > maxDelay) {
-      logDebug("delayNotifier: Maximum delay exceeded, terminating retries");
-      return throwError(() => new Error("Maximum delay exceeded"));
-    }
+    // ensure delay doesn't exceed max
+    const currentDelay = Math.min(
+      retryCount * delay + Math.floor(Math.random() * jitter),
+      maxDelay,
+    );
 
     logDebug(
-      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${error?.message}`,
+      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${error.message}`,
     );
     return timer(currentDelay);
   };
@@ -224,7 +229,7 @@ function serverErrorCheck(event: ExtendedHttpEvent) {
  * @param error Error thrown during request processing or retry exhaustion.
  * @returns Observable that immediately errors with the provided error.
  */
-function defaultErrorHandler(error: Error): Observable<never> {
+function defaultErrorHandler(error: HttpErrorResponse): Observable<never> {
   logDebug("defaultErrorHandler: Handling terminal error", error);
   return throwError(() => error);
 }
@@ -235,7 +240,7 @@ export type StreamEventFunction<T> = (
 ) => any | void;
 
 /**
- * Configures buffering, timeout, retry, and error handling for intercepted streaming requests.
+ * Configures retry/error behavior for all intercepted requests and chunk-specific behavior for streamed requests.
  * Why: Keeps request behavior customizable while sharing consistent defaults across the library.
  */
 export type StreamConfig = {
@@ -250,7 +255,9 @@ export type StreamConfig = {
   delayNotifier: DelayNotifierType;
   errorHandler: (error: any, caught: Observable<any>) => ObservableInput<any>;
   serverErrorCheck: (event: ExtendedHttpEvent) => HttpEvent<any>;
-  chunkTimeoutHandler: (error: Error) => Observable<never>;
+  chunkTimeoutHandler: (
+    info: TimeoutInfo<HttpEvent<any>, unknown>,
+  ) => Observable<never>;
   retryableErrorStatusCode: any[];
 };
 
@@ -267,13 +274,9 @@ export type DelayNotifierType = ({
   jitter: number;
   maxRetryCount: number;
   retryableErrorStatusCode: any[];
-}) => (error: SimpleError, retryCount?: number) => Observable<any>;
+}) => (error: HttpErrorResponse, retryCount?: number) => Observable<any>;
 
 export type ExtendedHttpEvent = HttpEvent<any> & {
   parsedData?: any;
 };
 
-export type SimpleError = {
-  message?: string;
-  status?: any;
-}
