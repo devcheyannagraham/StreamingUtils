@@ -83,7 +83,7 @@ let defaultStreamConfig: StreamConfig = {
     throwError(
       () =>
         new HttpErrorResponse({
-          statusText: "Chunk Request timed out",
+          error: "Chunk Request timed out",
           status: 408,
         }),
     ),
@@ -124,7 +124,7 @@ export const STREAM_CONFIG = new HttpContextToken<Partial<StreamConfig>>(
  * The helper keeps the original Angular `HttpEvent` available to consumers while
  * also exposing the buffered NDJSON payload as `event.parsedData` for a typed,
  * app-friendly callback surface.
- * `errorCB` receives terminal `HttpErrorResponse` values after retry handling, and `completeCB` runs when the stream ends.
+ * `errorCB` receives terminal errors shaped as `Partial<HttpErrorResponse>` after retry handling, and `completeCB` runs when the stream ends.
  * @typeParam T Parsed payload type used for `event.parsedData`.
  * @param callbacks Optional callbacks for next, error, and complete notifications.
  * @returns Observer object compatible with RxJS subscription methods.
@@ -173,7 +173,15 @@ function delayNotifier({
   maxRetryCount = defaultStreamConfig.maxRetryCount,
   retryableErrorStatusCode = defaultStreamConfig.retryableErrorStatusCode,
 }) {
-  return (error: Partial<HttpErrorResponse>, retryCount: number = maxRetryCount) => {
+  return (
+    error: Partial<HttpErrorResponse>,
+    retryCount: number = maxRetryCount,
+  ) => {
+    const errorMessage =
+      (error?.error as { message?: string } | undefined)?.message ||
+      (typeof error?.error === "string" ? error.error : undefined) ||
+      error?.message;
+
     // Stop scheduling retries after max retries reached.
     if (retryCount > maxRetryCount) {
       logDebug("delayNotifier: Maximum retries reached, terminating retries");
@@ -185,9 +193,9 @@ function delayNotifier({
       logDebug(
         "delayNotifier: Non-Retryable Error:",
         error?.status,
-        error?.message,
+        errorMessage,
       );
-      return throwError(() => (error));
+      return throwError(() => error);
     }
 
     // ensure delay doesn't exceed max
@@ -197,7 +205,7 @@ function delayNotifier({
     );
 
     logDebug(
-      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${error?.message}`,
+      `Retrying request after ${currentDelay}ms (retry count: ${retryCount}) due to: ${errorMessage}`,
     );
     return timer(currentDelay);
   };
@@ -229,7 +237,9 @@ function serverErrorCheck(event: ExtendedHttpEvent) {
  * @param error Error thrown during request processing or retry exhaustion.
  * @returns Observable that immediately errors with the provided error.
  */
-function defaultErrorHandler(error: Partial<HttpErrorResponse>): Observable<never> {
+function defaultErrorHandler(
+  error: Partial<HttpErrorResponse>,
+): Observable<never> {
   logDebug("defaultErrorHandler: Handling terminal error", error);
   return throwError(() => error);
 }
@@ -274,9 +284,11 @@ export type DelayNotifierType = ({
   jitter: number;
   maxRetryCount: number;
   retryableErrorStatusCode: any[];
-}) => (error: Partial<HttpErrorResponse>, retryCount?: number) => Observable<any>;
+}) => (
+  error: Partial<HttpErrorResponse>,
+  retryCount?: number,
+) => Observable<any>;
 
 export type ExtendedHttpEvent = HttpEvent<any> & {
   parsedData?: any;
 };
-
