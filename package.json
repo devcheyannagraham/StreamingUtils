@@ -16,6 +16,7 @@
   "scripts": {
     "build": "tsc",
     "prepack": "npm run build",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build",
     "patch": "npm version patch && git push --follow-tags && npm publish --access public",
     "minor": "npm version minor && git push --follow-tags && npm publish --access public",
