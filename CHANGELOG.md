@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-11-10
+
+### Added
+- Verified compatibility with Angular 22; `peerDependencies` now accept `^21.1.0 || ^22.0.0`.
+
 ## [5.0.0] - 2026-09-23
 
 ### Breaking Changes
